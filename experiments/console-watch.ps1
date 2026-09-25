@@ -15,7 +15,8 @@
 
 param(
   [int]$Seconds = 120,
-  [int]$PollMs = 100
+  [int]$PollMs = 100,
+  [string]$LogPath = ''
 )
 
 Add-Type -Language CSharp @'
@@ -97,6 +98,12 @@ while ((Get-Date) -lt $deadline) {
 
     Write-Host "[$stamp] 捕捉到可见控制台窗口" -ForegroundColor Yellow
     Write-Host "    标题   : $($now[$h])"
+    # 机器可读的一行记录，供自动化测试按时间区间把命中归属到具体测试用例。
+    if ($LogPath -ne '') {
+      $tick = (Get-Date).ToString('o')
+      $owner = if ($null -ne $info) { $info.Name } else { '(已退出)' }
+      Add-Content -LiteralPath $LogPath -Encoding utf8 -Value "$tick`tHIT`t$owner`t$($now[$h])"
+    }
     if ($null -ne $info) {
       Write-Host "    进程   : $($info.Name)  (PID $ownerPid)"
       $parentPid = $info.ParentProcessId
