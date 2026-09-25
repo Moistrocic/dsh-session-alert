@@ -44,6 +44,55 @@ RESULT: raised=true reverted=True unchanged=True
 **端别自报已在真实环境跑通**——`liveKinds:["desktop"]` 说明 ADR 0001 那条「客户端自报端别」
 的判断在 desktop 应用里确实成立。
 
+## 已修复：设置页报 HTTP 404
+
+### 症状
+
+用户截图显示设置页报「读取状态失败：**HTTP 404**」——不是 401，这个区别是关键：
+请求**确实到达了** Host 的 HTTP 服务（`dsh-app://` 代理生效），但插件那条路由不存在。
+
+### 两个真实缺陷
+
+**一、路由形状不符合契约（主因）。** `WebRoute` 的契约是
+`{ kind: 'exact' | 'prefix'; path: string; handler }`，而插件注册的是
+`{ method: 'POST', path, handler }`：
+
+- **没有 `kind`** —— 缺它的路由不按预期生效；
+- **`method` 根本不是契约的一部分** —— `register` 不校验多余字段，所以不报错。
+
+而 `webServer` 服务文档写明了未命中请求的去向：「the fallback handler answers anything
+not yet claimed during startup with **404**」——正是设置页收到的那个 404。
+
+修法：改为**一条 `kind: 'prefix'` 路由**覆盖 `ROUTE_PREFIX`，在其处理器内按
+`request.method` 与端点名分派（前缀匹配是纯字符串前缀，所以 `…/state` 与 `…/state-extra`
+都会进来，分派必须精确相等）；未知端点如实回 404，不静默落到某个分支。
+
+**二、服务查询时机（次因，但同样致命）。** 原写
+`const webServer = ctx.get('webServer'); if (webServer !== undefined) { …注册… }`。
+若激活时该服务尚未就绪，**整块注册被静默跳过**，只剩一条 warn——路由全没了。
+
+官方 practices 的写法是 `ctx.inject([...], (scopedCtx) => …)`；DSH 自己的
+`client-connection` 正是 `ctx.inject(['webServer'], (webCtx) => { webCtx.webServer.register(route) })`。
+
+### 为什么自检没抓到（这是更值得记的一半）
+
+`events-wiring-check.mjs` 当时**只断言「路由条数 >= 2」，从不检查路由形状**，因此照旧全绿。
+而它读状态的方式是「找路径以 `/state` 结尾的路由」——那对应的是「每端点一条路由」的旧设计，
+形状错了也照样能找到。
+
+现在补上的断言：路由数量为 1、**带 `kind` 字段**、`kind` 是 `prefix`/`exact`、
+**不再带非契约的 `method` 字段**、路径等于契约前缀、handler 是函数；
+以及逐端点探测分派——`GET /state` → 200、未知端点 → **404**、方法不匹配 → **404**、
+`POST /client-state` → 200。
+
+**只断言「注册了」不够，必须断言「形状对、分派对」。**
+
+### 教训
+
+修运行时错误时，若某个自检「一直是绿的」，要问的不是「它为什么没报错」，
+而是「**它到底断言了什么**」。这条 404 拖到现在，就是因为那个自检断言的是件无关紧要的
+事（条数），而真正出错的地方（形状）它从没看过。
+
 ## 已修复的一个严重缺陷：waterfall 监听器否决了用户的提问与审批
 
 ### 缺陷
