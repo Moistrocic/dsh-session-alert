@@ -48,6 +48,9 @@ const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const notify = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'notify.js')).href)
 const contract = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'contract.js')).href)
+const { auditListenerModes, auditPackageListeners } = await import(
+  pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'listener-mode-audit.mjs')).href
+)
 
 const {
   AlertDispatcher,
@@ -649,6 +652,68 @@ test('生成的铃声脚本：系统声音与文件两条路径', () => {
 test('生成的脚本用 CRLF（PowerShell 5.1 对 param 块的要求）', () => {
   assert.ok(buildToastScript({ title: 't', body: 'b' }).includes('\r\n'))
   assert.ok(!/(?<!\r)\n/.test(buildToastScript({ title: 't', body: 'b' })))
+})
+
+// ------------------------------------------- 事件监听器的 dispatch-mode 审计
+//
+// 这一组守的是**最严重的一类缺陷**：瀑布监听器不交出决定权会否决真实功能。
+//
+// 本插件曾经在 `user-questions/request` 与 `approval/request` 上注册了不调用 next 的
+// 监听器，于是**用户的提问与审批整条链都被否决**。而它在功能测试里表现为「一切正常」
+// ——处理器确实跑了、也确实没报错。因此这条断言必须独立存在，不能靠功能用例覆盖。
+//
+// cordis 契约原文（`@deepseek-ai/cordis/lib/types/events.js`）：
+//   "a listener that does not call `next()` vetoes the rest of the chain,
+//    including the built-in behavior."
+
+test('每个事件监听器都与它的 dispatch mode 相符（瀑布必须 return next()）', () => {
+  const { registrations, problems } = auditPackageListeners(PACKAGE_ROOT)
+  assert.ok(registrations.length > 0, '没有找到任何监听器注册——审计脚本本身可能失效了')
+  assert.deepEqual(problems, [], `监听器 mode 审计失败：\n  - ${problems.join('\n  - ')}`)
+})
+
+test('审计本身有效：缺 return next() 的瀑布监听器必须被抓出来', () => {
+  // 变异测试。一个不会失败的检查等于没有检查——它必须先能抓到。
+  const mutated = `
+    ctx.on('user-questions/request', function (request, next) {
+      observe(request)
+    }, { global: true })
+  `
+  const { problems } = auditListenerModes(mutated)
+  assert.equal(problems.length, 1, '应当恰好报出一条问题')
+  assert.match(problems[0], /缺少 return next\(\)/)
+
+  // 补上 return next() 之后应当通过
+  const fixed = `
+    ctx.on('user-questions/request', function (request, next) {
+      observe(request)
+      return next()
+    }, { global: true })
+  `
+  assert.deepEqual(auditListenerModes(fixed).problems, [])
+
+  // emit 模式的监听器带 next 形参也应被指出
+  const wrongMode = `
+    ctx.on('session/event', function (session, event, next) {
+      observe(event)
+    }, { global: true })
+  `
+  const wrongProblems = auditListenerModes(wrongMode).problems
+  assert.ok(wrongProblems.some((p) => p.includes('next')), `emit 模式不应带 next：${wrongProblems.join('；')}`)
+})
+
+test('审计覆盖了事件目录里全部已注册的监听器（新增监听器不会漏审）', () => {
+  const { registrations } = auditPackageListeners(PACKAGE_ROOT)
+  const events = registrations.map((r) => r.event).sort()
+  // 这四个是本插件当前的全部监听器。新增监听器时这条会失败，提醒把它的 mode 补进
+  // scripts/listener-mode-audit.mjs 的 EVENT_MODES——审计会因为「不在表里」而失败，
+  // 而不是静默跳过。
+  assert.deepEqual(events, [
+    'api-session/error',
+    'approval/request',
+    'session/event',
+    'user-questions/request',
+  ])
 })
 
 // ------------------------------------------------------- 可选的真机冒烟（--toast）
