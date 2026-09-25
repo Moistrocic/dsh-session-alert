@@ -153,34 +153,58 @@ turn/end:completed  275ce19f-c3f…      skipped:not-a-root-session ← 子代�
 - 离线自检 [`experiments/shape-check.mjs`](../experiments/shape-check.mjs) 9 项全通过，
   实测确认空 actions 时生成的脚本数组为空、守卫为假、不建按钮。
 
-## 一个应当改回官方原语的地方（待办，非缺陷）
+## HTTP 环回路由是正确的选择（此前的「应改回 host.call」已撤销）
 
-`cordis_inspect_query({ platform: 'client', provider: 'Builtin', method: 'listBuiltins' })`
-列出了动态 Client 半边可用的五个符号，其中一个是：
+`host.call` 来自**动态客户端半边**的闭包参数 —— runner 把 `host` 与 `harnessTrap`
+作为参数注入：
 
+```js
+closure(react, console, styles, host, harnessTrap(), ...traps, undefined, undefined)
 ```
-host — "Package-private JSON RPC from Client to this Package's Host half."
-       host.call(method: string, args?: JsonValue): Promise<JsonValue>
+
+它对应 Host 半边的 `harness.handle(method, fn)`。**两者都只存在于动态半边。**
+
+本插件的两个半边都是**静态**的（Host 用 `apply(ctx, config)`，Client 用
+`window.__ModuleLoader__.load`），闭包里没有 `host`，因此 **`host.call` 在这里不存在**。
+
+而且动态半边是靠**遮蔽全局量**来禁网络的：
+
+```js
+DYNAMIC_CLIENT_REDIRECTS = {
+  fetch: "network belongs to the HOST half: register a handler there with
+          harness.handle(method, fn) and call it here via host.call(method, args).",
+  setTimeout: TIMER_REDIRECT, setInterval: TIMER_REDIRECT, …
+}
 ```
 
-**即「客户端 → 本包 Host 半边」的 RPC 是官方支持且成对存在的能力。**
+静态 bundle 走 `require()` 模块表，这些全局量不被遮蔽 —— 这正是我的 HTTP 环回路由能
+工作、而动态半边不能用的原因。
 
-我当前用的是 HTTP 环回路由（`fetch('/api/dsh-session-alert/…')`）。它**能工作**
-（实测 `POST /client-state` → 200 `{"ok":true,"liveKinds":["desktop"]}`，
-且插件自注册的路由不需要凭据），但相比 `host.call` 有两个缺点：
+**所以 HTTP 环回路由是静态半边的合理选择**，不是「放弃了官方原语」。
+（此前记的「应改回 host.call」基于一个不成立的假设，已撤销。）
 
-1. **多暴露了一个 HTTP 面。** 环回端口上的路由任何本机进程都能访问，
-   而 `host.call` 是包内私有通道，不经过网络。
-2. **少了一层约定。** 路由路径要在两处保持一致（Host 注册、Client 请求），
-   不一致时表现为静默失败；RPC 方法名是契约的一部分。
+这个区别还解释了一个**曾经的潜在缺陷**：`insertVariable` 里用 `setTimeout` 设置光标位置。
+在动态半边里那会抛 `setTimeout is not available in a dynamic client half`。
+本插件是静态半边所以能跑，但依赖这一点是脆的——已改为同步设置选区。
 
-**为什么当初改成了 HTTP**：我从 `dsh-doctor` 的客户端半边看到它用 `globalThis.fetch`
-访问 `/api/doctor`，于是推断「bundled 客户端走 HTTP 而不是 host.call」。
-那个推断只说明**它**选了 HTTP，不说明 `host.call` 不可用——而 Builtin 清单直接否证了后者。
+## 官方插件技能文档：本该最先读的东西
 
-**结论**：这不是缺陷（HTTP 路径经实测可用），但 `host.call` 更合适。
-改回属于重构，需要在真实环境验证 RPC 是否按此约定连通，因此列为待办而不是现在动。
-顺带记下这次教训：**从一个实现的用法推断「只有这种用法」，是过度概括**。
+`@deepseek-ai/dsh-agent-preset/skills/cordis-plugin-development/` 是 DSH 自带的插件开发
+技能，含 `SKILL.md`、五份 references（host-plugin / ui-plugin / mcp-bundle / practices /
+verification）与两个可直接拷贝的模板。
+
+**入口是它，而不是逆向 bundle。** 我直到第 4 轮才发现它，此前的实现有几处是自己摸索的。
+从它那里确认或纠正的关键几条：
+
+| 条目 | 结论 |
+| --- | --- |
+| 不得 import `@deepseek-ai/dsh-client-ui-primitives` | 正确做法是**把 markup/CSS/behavior 抄进插件**，类名加自己的前缀，只保留 `--dsw-alias-*` 令牌引用。我做对了——但**原本打算直接 import，只是还没走到那一步** |
+| 样式只用主题令牌 | 已符合 |
+| 客户端半边注入 slots | 应声明 `inject: ['slots']` 并直接用 `ctx.slots.inject(...)`，而不是运行时 `ctx.get('slots')` 守卫 |
+| `dsh.client.immediately` | 模板里有 `true`，我漏了 |
+| 可访问性行为 | 开关需 `role="switch"` + `aria-checked`；这些是「users rely on」的行为，抄样式时不能只抄外观 |
+| 不要 `require` 其它 Harness Client 包 | 已符合（只 `require('react')`） |
+| 验证局限要显式说明 | 见 `references/verification.md` |
 
 ## 一个必须记住的区别：磁盘上的代码 ≠ 运行中的代码
 
