@@ -267,6 +267,26 @@ if (process.platform === 'win32' && state !== null) {
     `注册表里是 ${JSON.stringify(actual)}，配置里是 ${JSON.stringify(wanted)}` +
     '——不一致时通知最上方仍显示注册名，插件会在 toast 里保留标题行（不静默，但也不是你要的样子）')
   if (actual !== null) console.log(`         AUMID「${primary}」的显示名：${JSON.stringify(actual)}；titleInAppName=${state.aumid?.titleInAppName}`)
+
+  // 通知图标：注册表的 IconUri 必须指向插件自带的那份（由 DSH 自己的图标生成）。
+  let iconUri = null
+  if (typeof primary === 'string' && primary.length > 0) {
+    try {
+      const out = execFileSync('reg.exe', [
+        'query', `HKCU\\Software\\Classes\\AppUserModelId\\${primary}`, '/v', 'IconUri',
+      ], { encoding: 'utf8' })
+      const match = /IconUri\s+REG_SZ\s+(.*)/.exec(out)
+      iconUri = match === null ? null : match[1].trim()
+    } catch {
+      iconUri = null
+    }
+  }
+  const iconFile = fileURLToPath(new URL('../assets/notification-icon.ico', import.meta.url))
+  check('通知图标指向插件自带的那份（而不是 Windows 通用图标）',
+    iconUri !== null && iconUri.toLowerCase() === iconFile.toLowerCase(),
+    `注册表里是 ${JSON.stringify(iconUri)}，期望 ${JSON.stringify(iconFile)}` +
+    '——不是它就会显示成一个与 DSH 无关的通用图标')
+  if (iconUri !== null) console.log(`         图标：${iconUri}`)
 }
 
 // ---------------------------------------------------------------- 汇总

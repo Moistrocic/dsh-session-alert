@@ -55,16 +55,27 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
    （`scripts/set-aumid-display-name.ps1`），同步成功后自有 AUMID 就不再写标题行
    （后备 AUMID 始终写）。**不要为了让那行改名去重命名开始菜单快捷方式**：
    快捷方式的名字是 `isAumidRegistered()` 的判据，改名会让插件退回后备 AUMID。
+   通知图标同理走两条路：注册表 `IconUri` + 快捷方式图标（当场生效），
+   以及 toast 的 `appLogoOverride`（Host 侧）。图标由 `npm run build:icon` 从
+   DSH 自己的 `resources\icon.png` 生成（PNG + 多尺寸 ICO），产物在 `assets/`。
 3. **动作的结果必须报在动作旁边。** 「发送这条通知」的按钮在页面中部，而提示一开始报在
    页面底部的「操作」行——用户点了按钮、结果出现在屏幕外，反馈就是「按了没反应」。
    `notice` 因此带 `where`，行为审计会用**祖先链**断言提示确实在按钮那一行里。
    同理，失败提示要说清**下一步该做什么**（404 = Host 半边没重启，就直说）。
+4. **Host 半边改了必须重启，重挂载插件不能替代。** 实测：用插件管理器把
+   `include:session-alert` 禁用再启用，插件确实重新挂载（`/state` 401 → 200），
+   但**跑的还是旧代码**——cordis Loader 复用 Node 的 ESM 缓存（按 URL 缓存）。
+   验证新 Host 代码是否在跑，看 `/state` 里的新字段，不要靠「我刚重启过」的记忆。
+5. **PowerShell 变量名大小写不敏感**：`param([string]$Source)` 与 `$source = …` 是**同一个
+   变量**。踩过一次：函数体里读 `$script:source` 得到 `$null`，`$Size / $null` 报
+   「Attempted to divide by zero」——报错指向除法，真因是命名冲突。函数要用什么就显式传参。
 
 ## 常用命令
 
 ```powershell
-npm test                                     # 73 条离线断言
+npm test                                     # 76 条离线断言
 npm test -- --toast                          # 额外真发一条通知（真机冒烟）
+npm run build:icon                           # 从 DSH 自己的图标重新生成通知图标（assets/）
 node experiments/post-restart-check.mjs      # 重启后先跑这条：逐项判定哪些修复已生效
 node experiments/events-wiring-check.mjs     # 事件接线（真实载荷 + 瀑布 next() 断言）
 node experiments/client-style-audit.mjs --mutate     # 样式注入审计 + 变异检查

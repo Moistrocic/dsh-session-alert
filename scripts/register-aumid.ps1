@@ -31,6 +31,10 @@
 [CmdletBinding()]
 param(
     [string]$Aumid = 'DSH Session Alert',
+    # 通知最上方那一行的显示名。留空表示沿用 AUMID（历史行为）。
+    # **加这个参数是为了让 -Force 重建不冲掉用户设的署名**：以前这里硬写 $Aumid，
+    # 于是一次「换个图标」的重建会把署名改回注册名，用户看到的是「改名没生效」。
+    [string]$DisplayName = '',
     [switch]$Unregister,
     [switch]$Status,
     [switch]$Force,
@@ -42,7 +46,13 @@ $ErrorActionPreference = 'Stop'
 $programsDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $shortcutPath = Join-Path $programsDir "$Aumid.lnk"
 $registryPath = "HKCU:\SOFTWARE\Classes\AppUserModelId\$Aumid"
-$iconPath = Join-Path $env:SystemRoot 'System32\shell32.dll'
+# 通知/任务栏上的应用图标。取自 DeepSeek Harness 自己的图标，由
+# scripts/build-notification-icon.ps1 生成（多尺寸 ICO）。**不要退回 shell32.dll**：
+# 那是 Windows 的通用图标，通知里会出现一个与 DSH 无关的图案。
+$iconPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\notification-icon.ico'
+if (-not (Test-Path -LiteralPath $iconPath)) {
+    $iconPath = Join-Path $env:SystemRoot 'System32\shell32.dll'
+}
 $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 function Write-Line {
@@ -193,10 +203,19 @@ function Test-RegistryState {
     try {
         $display = (Get-ItemProperty -Path $registryPath -Name 'DisplayName' -ErrorAction Stop).DisplayName
         $showInSettings = (Get-ItemProperty -Path $registryPath -Name 'ShowInSettings' -ErrorAction Stop).ShowInSettings
-        return ($display -eq $Aumid) -and ([int]$showInSettings -eq 1)
+        $icon = (Get-ItemProperty -Path $registryPath -Name 'IconUri' -ErrorAction Stop).IconUri
     } catch {
         return $false
     }
+    # **显示名不再要求等于 AUMID。** 它是用户的通知署名（插件会同步它），
+    # 早先这里写死 `$display -eq $Aumid`，于是用户一改署名，自检就永远报「不符」，
+    # 连 `-Force` 也会以退出码 1 收场——看起来像注册坏了，其实是判据错了。
+    if ([string]::IsNullOrWhiteSpace($display)) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($DisplayName) -and $display -ne $DisplayName.Trim()) { return $false }
+    if ([int]$showInSettings -ne 1) { return $false }
+    # 图标也要对得上：否则「换了图标」不会被识别为需要重建（幂等优化反而挡住了更新）。
+    if ($icon -ne $iconPath) { return $false }
+    return $true
 }
 
 function Test-ShortcutState {
@@ -240,7 +259,7 @@ if ((Test-RegistryState) -and (-not $Force)) {
     Write-Line "  注册表键已就绪，未改动：$registryPath" 'DarkGray'
 } else {
     New-Item -Path $registryPath -Force | Out-Null
-    Set-ItemProperty -Path $registryPath -Name 'DisplayName' -Value $Aumid
+    Set-ItemProperty -Path $registryPath -Name 'DisplayName' -Value $(if ([string]::IsNullOrWhiteSpace($DisplayName)) { $Aumid } else { $DisplayName.Trim() })
     Set-ItemProperty -Path $registryPath -Name 'ShowInSettings' -Value 1 -Type DWord
     Set-ItemProperty -Path $registryPath -Name 'IconUri' -Value $iconPath
     Write-Line "  已写注册表键：$registryPath" 'Green'

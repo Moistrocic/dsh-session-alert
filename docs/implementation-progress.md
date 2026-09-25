@@ -6,6 +6,79 @@
 
 ---
 
+# 2026-09-25 第七轮：署名只留在标题上、去掉正文里的工作区前缀、换成 DSH 自己的图标
+
+## 一、通知署名只出现在标题上
+
+用户的原话：「通知署名只需显示在标题上即可，内容显示不应该显示通知署名（直接移除即可）」。
+
+两处都做了，因为它们其实是同一件事的两半：
+
+1. **toast 的标题行**（署名会在这里出现第二次）：`titleInAppName` 为真时自有 AUMID 不再写它
+   ——上一轮已实现，属 Host 侧，**需要重启**才进进程。
+2. **正文开头的 `{workspace}`**：用户一直把它当成插件的署名（它渲染出来就是工作区目录名
+   `dsh-session-alert`）。默认正文去掉了这个前缀，**并且同步改了用户已保存的四条模板**——
+   模板是配置驱动的，所以这一半**当场生效、不用重启**。
+
+`{workspace}` 仍是可用变量（变量芯片还在），只是不再出现在默认正文里。
+
+## 二、「署名改完立即生效，不要重启」
+
+**同步逻辑本来就是「保存即同步」**（`/config` 保存后立刻跑 `set-aumid-display-name.ps1`），
+也就是说：**装好之后，改署名是立即生效的，不需要任何重启**。
+
+需要重启的只有一件事：**把这段代码装进正在运行的进程**——Host 半边在 DSH 进程里，而改动发生在
+进程启动之后。这不是「每次改署名都要重启」，而是「一次性的安装」。
+
+本轮还实测确认了**「重挂载插件」不能替代重启**：用插件管理器把 `include:session-alert`
+禁用再启用，插件确实重新挂载了（`/state` 从 401 恢复到 200），但**跑的还是旧代码**
+（`/notify` 仍 404、`/state` 里没有新字段）——cordis Loader 复用 Node 的 ESM 缓存，
+按 URL 缓存，重挂载拿到的是同一个模块实例。
+
+## 三、通知图标换成 DeepSeek Harness 自己的图标
+
+图标有两条互相独立的通路，都做了：
+
+| 通路 | 表现 | 生效 |
+| --- | --- | --- |
+| 注册表的 `IconUri` + 开始菜单快捷方式的图标 | Windows 的「应用身份」图标 | **当场生效**（不需要重启） |
+| toast XML 的 `<image placement="appLogoOverride">` | 通知内的应用小图 | Host 侧，需重启 |
+
+做法：
+
+- 新增 [`scripts/build-notification-icon.ps1`](../scripts/build-notification-icon.ps1)：
+  从 DSH 安装目录的 `resources\icon.png`（1024×1024）生成两份资源——
+  toast 用的 256×256 PNG，以及 `IconUri`/快捷方式用的**多尺寸 ICO**（16/24/32/48/64/128/256，
+  只放一张大图会让小尺寸位置显示成缩略的糊图）。ICO 容器是脚本自己拼的：Vista 之后条目里
+  可以直接放 PNG 数据，而 .NET 没有公开的多尺寸写出 API。生成后**校验尺寸、条目数与 PNG 签名**。
+- `register-aumid.ps1` 的图标从 `shell32.dll`（Windows 通用图标）改为插件自带的那份，
+  并新增 `-DisplayName`：**`-Force` 重建不再把用户的署名冲回注册名**（以前硬写 `$Aumid`，
+  一次「换个图标」的重建会让用户看到「改名没生效」）。
+- 顺手修掉 `Test-RegistryState` 里 `$display -eq $Aumid` 这条判据：署名改成用户的值之后，
+  自检永远报「不符」，连 `-Force` 都以退出码 1 收场——**看起来像注册坏了，其实是判据错了**。
+  现在它只要求显示名非空（显式给了 `-DisplayName` 就要求一致）、`ShowInSettings=1`、
+  且 `IconUri` 指向我们那份（否则「换了图标」不会被识别为需要重建）。
+
+## 四、这一轮踩到的 PowerShell 坑
+
+**`param([string]$Source)` 与 `$source = <图片>` 是同一个变量**——PowerShell 变量名大小写不敏感。
+我在函数体里读 `$script:source` 取到 `$null`，于是 `$Size / $null` 报
+「Attempted to divide by zero」：**报错指向除法，真因是命名冲突与作用域**。
+改成把图片作为参数显式传进函数，两个坑一起消失。
+
+（`.ps1` 的 BOM + CRLF 硬要求这一轮又踩了两次——`edit` 工具写的是无 BOM UTF-8，
+`npm test` 里那条断言每次都立刻抓到，这正是它存在的意义。）
+
+## 五、实测
+
+- 模板去掉 `{workspace}`：写配置成功并回读确认（`ok=true persisted=true`），**当场生效**。
+- 图标：`register-aumid.ps1 -Force -DisplayName 'Deepseek Harness'` 退出 0，`-Status` 全绿；
+  `IconUri` = 插件自带的 `notification-icon.ico`；`post-restart-check` 里有可机器判定的比对。
+- `npm test` 73 → **76 条**（默认正文不含 `{workspace}`；toast 图标元素的守卫；图标资源格式）。
+- 客户端半边照旧热重载；Host 侧（署名同步、标题行、`appLogoOverride`、`/notify`）仍需一次重启。
+
+---
+
 # 2026-09-25 第六轮：「按了没反应」——反馈报错了地方
 
 用户反馈「发送这条通知」，按了没反应。查证后是**两个原因叠加**：

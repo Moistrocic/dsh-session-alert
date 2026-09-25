@@ -1153,6 +1153,48 @@ test('全部 .ps1 都是 UTF-8 BOM + CRLF（PowerShell 5.1 的硬要求）', () 
   }
 })
 
+test('默认正文不含 {workspace}（它在通知里既重复又容易被当成署名）', () => {
+  const config = contract.defaultConfig()
+  for (const id of contract.SCENARIO_IDS) {
+    assert.ok(
+      !config.scenarios[id].body.includes('{workspace}'),
+      `${id} 的默认正文里仍有 {workspace}：${config.scenarios[id].body}`,
+    )
+  }
+  // 变量本身仍然可用——只是不再出现在默认正文里，谁需要谁自己加回去。
+  assert.ok(contract.VARIABLES.some((v) => v.name === 'workspace'), 'workspace 变量不该被删掉')
+})
+
+test('toast 脚本：给了图标路径就写 appLogoOverride，没给就完全不写', () => {
+  const withIcon = notify.buildToastScript({ title: 'T', body: 'B', iconPath: 'C:\\a\\b\\icon.png' })
+  // Win32 应用引用本地图片用 `file:///`，且路径里的反斜杠要换成斜杠。
+  assert.match(withIcon, /\$iconUri = 'file:\/\/\/C:\/a\/b\/icon\.png'/)
+  assert.match(withIcon, /SetAttribute\('placement', 'appLogoOverride'\)/)
+  // **元素创建必须在「路径非空」的守卫里**：否则空路径会往通知里塞一个裂图占位。
+  const guard = withIcon.indexOf('if ($IconUri.Length -gt 0) {')
+  const create = withIcon.indexOf("$imageNode = $document.CreateElement('image')")
+  assert.ok(guard >= 0, '缺少 $IconUri 非空守卫')
+  assert.ok(create > guard, '图标元素必须写在守卫内部')
+
+  const without = notify.buildToastScript({ title: 'T', body: 'B' })
+  assert.match(without, /\$iconUri = ''/, '没给图标时应当传空串（运行时就不写该元素）')
+})
+
+test('通知图标资源存在且格式正确（PNG 256×256 / 多尺寸 ICO）', () => {
+  // 图标是从 DeepSeek Harness 自己的图标生成的（scripts/build-notification-icon.ps1），
+  // 属于**外部来源的产物**：它被删掉或压坏了不会有任何报错，只会让通知里少一个图标。
+  const png = readFileSync(join(PACKAGE_ROOT, 'assets', 'notification-icon.png'))
+  assert.equal(png[0], 0x89, 'PNG 签名不对')
+  assert.equal(png[1], 0x50, 'PNG 签名不对')
+  assert.equal(png.readUInt32BE(16), 256, 'PNG 应当是 256×256')
+  assert.equal(png.readUInt32BE(20), 256, 'PNG 应当是 256×256')
+
+  const ico = readFileSync(join(PACKAGE_ROOT, 'assets', 'notification-icon.ico'))
+  assert.equal(ico.readUInt16LE(0), 0, 'ICO reserved 字段应为 0')
+  assert.equal(ico.readUInt16LE(2), 1, 'ICO type 字段应为 1（图标）')
+  assert.ok(ico.readUInt16LE(4) >= 4, `ICO 应当含多个尺寸，实际 ${ico.readUInt16LE(4)} 个`)
+})
+
 if (process.argv.includes('--toast')) {
   test('真机冒烟：真发一条通知，按退出码判定实际走通了哪条路径', async () => {
     assert.equal(process.platform, 'win32', `--toast 只在 Windows 上有意义，当前是 ${process.platform}`)

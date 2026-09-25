@@ -36,11 +36,13 @@
     "lib",
     "bin",
     "scripts",
+    "assets",
     "cordis.patch.yml",
     "README.md"
   ],
   "scripts": {
     "build:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-launcher.ps1",
+    "build:icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-notification-icon.ps1",
     "test": "node scripts/selftest.mjs",
     "test:toast": "node scripts/selftest.mjs --toast",
     "register-aumid": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register-aumid.ps1"
