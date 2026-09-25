@@ -60,6 +60,45 @@ RESULT: raised=true reverted=True unchanged=True
 
 ## 已确证
 
+### 降级链：刻意演练四级全部真实发生
+
+`experiments/notify-degradation-drill.ps1`（破坏性，自带 `try/finally` 恢复 + SHA256 自证），
+`DRILL_EXIT=0`，五个阶段 `FAIL=0`，快捷方式指纹前后一致。关键是**每一级都真的发生了**，
+不只是"没报错"：
+
+```
+已改名：DSH Session Alert.lnk -> .lnk.drill-bak      <- 制造「自有 AUMID 未注册」
+投递计划: [{后备 AUMID, code:5}]                      <- 自有 AUMID 根本没被尝试
+后备 toast: code=5   [PASS] 回退到退出码 5
+托盘气泡:   code=6   [PASS] 回退到退出码 6
+恢复后计划: [{自有 AUMID, code:0}, {后备, code:5}] -> code=0
+快捷方式指纹前后一致: True                            <- 破坏性操作已完整还原
+```
+
+「自有 AUMID 根本没被尝试」值得单列：未注册时试它只会得到「进操作中心但无横幅」，
+而按退出码约定会报 `0`——那是个**假信号**。所以正确做法是根本不试。
+
+### 无可见控制台：三条触发路径一起验证
+
+判据是「监视期间有没有**新出现的可见**控制台窗口」，而不是「进程自报没控制台」——
+两者都要，因为自报只能证明该进程自己。
+
+| 触发 | 独立证据 | 是否落在监视窗口内 |
+| --- | --- | --- |
+| 协议激活（启动器） | `[41372]` @16:39:33，`rect 1721x927 -> 1721x927`，`raised=true reverted=True` | ✅ |
+| 通知投递 ×2 | `[test]` @16:39:27 与 16:39:37，`via=toast（自有 AUMID）` | ✅ |
+| 监视器结果 | **共捕捉到 0 个新出现的可见控制台窗口**（命中日志文件未生成 = 零命中） | — |
+| 启动器自报 | `GetConsoleWindow()=0 => NO_CONSOLE（未分配控制台）` | — |
+
+**「触发是否真的落在监视窗口内」必须单独确认。** 我第一次跑这个检查时把
+`console-watch.ps1` 当成命令包装器用了（它是**定时监视**，`-Seconds` 期间旁路观察），
+于是什么都没触发就得到一个"0 个控制台窗口"——那个数字毫无意义。
+第二次用 `Start-Process` 后台起监视器、再触发，并用启动器日志与插件记录的时间戳
+证明触发确实落在窗口内，这次才成立。
+
+顺带记一个使用细节：`-LogPath` **只在捕获到控制台窗口时才写入**，因此
+「日志文件不存在」= 零命中，不是脚本失败。
+
 ### 事件接线：四类场景逐场景隔离验证通过
 
 [`experiments/events-wiring-check.mjs`](../experiments/events-wiring-check.mjs) 13 项断言全通过。
@@ -113,6 +152,30 @@ turn/end:completed  275ce19f-c3f…      skipped:not-a-root-session ← 子代�
   `sent:card+button` / `sent:card-only` / `suppressed:chime-only`。
 - 离线自检 [`experiments/shape-check.mjs`](../experiments/shape-check.mjs) 9 项全通过，
   实测确认空 actions 时生成的脚本数组为空、守卫为假、不建按钮。
+
+## 一个必须记住的区别：磁盘上的代码 ≠ 运行中的代码
+
+**Host 半边在 DSH 进程内，改了 `lib/index.js` 后必须重新挂载插件才生效。**
+`lib/client.js` 不同——它是客户端 bundle，刷新页面即可（且 `link:` 指向工作区，
+文件改动立刻可见）。
+
+这个区别害我做过一次**错误推断**，值得完整记下：
+
+1. 我跑了 `experiments/events-wiring-check.mjs`，看到判决串是 `sent:card-only`
+   （形状标识是那一轮才加的），于是断言「运行中已是新代码」。
+2. 下一轮真实投递的记录却是**裸的 `sent`**：
+   `16:35:25 [turnEnd] via=toast（自有 AUMID） reason=sent`
+   ——运行中的 Host **仍是 16:07 挂载的旧代码**。
+
+**错在哪里：** 那个自检是 `import('../lib/index.js')`，读的是**磁盘上的新文件**，
+所以它测的必然是新代码。拿「一个专门测新代码的测试」的输出去推断「另一个进程里运行的
+是什么」，这个推断本身就不成立。
+
+这与本项目其它几次「断言错而代码对」是同一类错误：**先确认判据本身成立，再拿它下结论。**
+判据应是「运行中进程的实际输出」，而不是任何从磁盘加载的结果。
+
+顺带说明为什么之前一直没看出来：抑制路径的判决串（`suppressed:chime-only`）**不带形状**，
+只有成功投递才带。所以在抑制开启的常态下，新旧代码的判决串长得一模一样。
 
 ## 验收工具（`experiments/`，均为人工调用，不并入 `npm test`）
 
