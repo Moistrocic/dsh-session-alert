@@ -216,13 +216,27 @@ const slots = {
 //
 // 同时提供 `locale`：插件会把文本字典注册进去并绑定翻译函数。
 // **只提供 slots 会让本地化那段代码根本不执行**，测不到它会不会抛错。
+//
+// 替身要**真实**：`bind` 返回的函数应当像真服务那样从**已注册的字典**里取词。
+// 早先写成 `bind: () => (key) => key`（回显键名）是错的——那既测不到服务路径，
+// 又会因为「服务返回了非空字符串」而绕过本地表回退，导致断言看到一排键名。
+// 顺便说：真服务在未命中时也是回显键名，所以那个回退判断是必要的（见 client.js 的 text()）。
 const registeredLocaleDicts = []
+const localeDicts = new Map()
 const localeService = {
   register: (ns, locale, dict) => {
     registeredLocaleDicts.push({ ns, locale, keys: Object.keys(dict).length })
+    localeDicts.set(`${ns}\u0000${locale}`, dict)
     return () => {}
   },
-  bind: () => (key) => key,
+  // 像真服务一样：按 (ns, locale) 查字典，未命中则回显键名。
+  bind: (ns) => (key) => {
+    for (const locale of ['zh', 'en']) {
+      const dict = localeDicts.get(`${ns}\u0000${locale}`)
+      if (dict !== undefined && dict[key] !== undefined) return dict[key]
+    }
+    return key
+  },
 }
 const ctx = {
   effect: (fn) => { try { fn() } catch (e) { console.log('  effect 抛错:', e.message) } ; return () => {} },
