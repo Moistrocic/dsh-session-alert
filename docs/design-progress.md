@@ -53,6 +53,13 @@
 | 7 | **`spawn` 必须用 `stdio: 'ignore'`**（配合 `windowsHide: true`）。 | 须验证：确认管道 stdio 在本沙箱下确实失败、`'ignore'` 确实可用 |
 | 8 | **操作中心持久化需要一次 HKCU 写入：** 建 `...\Notifications\Settings\<aumid>` 键并写 `ShowInActionCenter=1`。否则 Win32 AUMID 的 toast 在应用获得焦点后就会从操作中心消失。 | 须验证：写入前后各发一条，检查通知中心 |
 | 9 | **注入风险：绝不能把标题/正文拼进命令行字符串。** 必须用 `-EncodedCommand`；脚本内构造 XML 时用 `CreateTextNode`，不拼 XML 字符串。 | 须验证：标题里放引号与 `<b>`，确认安全且显示正确 |
+| 10 | **任何进程启动都不得分配控制台**，判据是 `GetConsoleWindow()` 返回 `NULL`，而不是「窗口被隐藏」。通知路径的 `stdio:'ignore'` + `windowsHide:true` 实测已满足；协议激活路径必须用 `conhost.exe --headless`。 | 已实测，见 [ADR 0004](./adr/0004-no-console-allocation.md) |
+| 11 | **`.ps1` 必须带 UTF-8 BOM。** Windows PowerShell 5.1 读取**无 BOM** 的 `.ps1` 时按 ANSI 解码（中文系统即 GBK），脚本内中文变乱码，进而破坏引号配对、报出与真实原因无关的语法错误。 | 已实测：无 BOM 时报 `Missing '=' operator after key in hash literal`，加 BOM 后正常 |
+| 12 | **`.ps1` 必须用 CRLF 换行。** LF 会让 PowerShell 5.1 的 `param(...)` 块解析失败，报 `Unexpected token ')'`。 | 已实测：同一脚本 LF 换行报错，CRLF 正常 |
+
+> 第 10–12 条都是**静态约束**，不是运行时逻辑：违反它们的代码不会在单测里失败，只会在真实
+> 机器上以难以归因的方式表现（闪窗、乱码、莫名语法错误）。因此已写进 `.gitattributes`
+> 并应作为代码审查检查项。
 
 ---
 
@@ -210,13 +217,19 @@ DSH 窗口**——而不是依赖 `dsh://open` 让应用自己爬起来。
 代价与约束：
 
 - 需要一次性写 HKCU 注册该协议方案（无需管理员）。
-- 需要一个常驻的隐藏进程或短命脚本；本实验用的是短命脚本（`-WindowStyle Hidden`）。
+- 需要一个常驻的隐藏进程或短命脚本；本实验用的是短命脚本。
+- **命令行必须用 `conhost.exe --headless` 启动**，否则每次点击都会闪一个命令行窗口。
+  `-WindowStyle Hidden` 与 `wscript` 启动器经实测都不合格（仍会分配控制台），
+  详见 [ADR 0004](./adr/0004-no-console-allocation.md)。这是用户实际报告的问题，
+  已实测定位并给出可用方案。
 - **一个无法用程序验证的缺口**：我点不了 toast 上的按钮，所以「toast 按钮的
   `activationType="protocol"` 是否会走与实验 C 相同的 ShellExecute 路径」**只能由人工
   点击确认**。这一点已列入验收标准。
 
-探针脚本见 [`experiments/focus-probe.ps1`](../experiments/focus-probe.ps1)，可在验收时
-直接复用。
+探针脚本见 [`experiments/focus-probe.ps1`](../experiments/focus-probe.ps1)，
+控制台判据见 [`experiments/conprobe.ps1`](../experiments/conprobe.ps1) 与
+[`experiments/launch-methods.ps1`](../experiments/launch-methods.ps1)，
+均可在验收时直接复用。
 
 ---
 

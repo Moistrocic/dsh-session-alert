@@ -1,12 +1,19 @@
 # 统一按 LF 存储；避免 core.autocrlf=true 带来的反复转换与警告。
 * text=auto eol=lf
 
-# PowerShell 脚本必须用 CRLF：LF 换行会让 Windows PowerShell 5.1 的
-# param(...) 块解析失败（报 "Unexpected token ')'"）。此处显式声明，
-# 使脚本以 CRLF 检出，并在提交时归一化——否则每次改动都会整文件 diff。
-*.ps1 text eol=crlf
-*.psm1 text eol=crlf
-*.psd1 text eol=crlf
+# PowerShell 脚本有两条硬要求，缺一条就会出问题：
+#
+#   1) CRLF 换行。LF 会让 Windows PowerShell 5.1 的 param(...) 块解析失败，
+#      报 "Unexpected token ')'"。
+#   2) UTF-8 BOM。PowerShell 5.1 读取无 BOM 的 .ps1 时按 ANSI 解码
+#      （中文系统上是 GBK），脚本内的中文会变乱码，进而破坏引号配对、
+#      造成难以理解的语法错误。
+#
+# 因此这里同时声明 CRLF 与 UTF-8 工作区编码。注意 eol= 只在检出时生效，
+# 已有文件需要手工归一化一次。
+*.ps1 text eol=crlf working-tree-encoding=UTF-8
+*.psm1 text eol=crlf working-tree-encoding=UTF-8
+*.psd1 text eol=crlf working-tree-encoding=UTF-8
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
