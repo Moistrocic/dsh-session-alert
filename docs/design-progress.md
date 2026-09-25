@@ -262,33 +262,57 @@ DSH 窗口**——而不是依赖 `dsh://open` 让应用自己爬起来。
 复现提示：每轮验证后会清理协议方案，**通知中心里的旧通知按钮因此会变成死链**。若点击
 「没反应」，先确认点的是当轮新弹出的那条通知。
 
-### 前台切换：常态可用，边界情形受前台锁限制
+### 前台切换：拆成「可见」与「焦点」两件事后，核心需求可靠达成
 
-用户提出「由 DSH 侧完成前台切换」。实测支持这个思路——Windows 前台规则里
-「调用进程收到了最后一次输入事件」本身就是取得前台权的条件，而点击通知正是这样一次
-输入。同一 helper、同一 `SetForegroundWindow` 直调，三种情形的结果：
+用户提出「由 DSH 侧完成前台切换」。沿着这条线查下去，**并查阅微软官方文档后**，才看清
+之前反复失败的原因：我把「把窗口弄到用户眼前」当成了**一个**目标，而它其实是两件事，
+可达成性完全不同。
 
-| 情形 | 结果 |
-| --- | --- |
-| DSH 为前台应用 | **第 1 次即成功** |
-| DSH 最小化、无其他应用抢占（最小化时焦点回到 DSH 自己） | **第 1 次即成功** |
-| 用户正在别的应用里**持续活动**（Chrome 播放视频） | 连续 8 次 `False`，被前台锁拒绝 |
+| 目标 | 可达成性 | 机制 |
+| --- | --- | --- |
+| 窗口**可见地出现在最上层**（用户能看见） | **可靠** | `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE \| SWP_NOMOVE \| SWP_NOSIZE \| SWP_SHOWWINDOW)` |
+| 窗口**取得前台焦点**（可直接打字） | **按设计被拒绝** | `SetForegroundWindow`，受前台锁限制 |
 
-**前两行是常态，第三行是边界情形。** 该情形下七种手法实测全部无效：直调
-`SetForegroundWindow`、`AllowSetForegroundWindow` 后再调、先最小化再还原、
-`SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)`、`BringWindowToTop` 循环、
-`AttachThreadInput`（返回 `False`）、`SwitchToThisWindow`。这是 Windows 的设计行为，
-目的是不打断用户当前正在做的事；**不采用任何绕过它的侵入性手段**。
+微软 [`SetForegroundWindow` 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
+原文：*"An application cannot force a window to the foreground while the user is
+working with another window. Instead, Windows flashes the taskbar button."*
+而它**自己的示例**正是把两件事分开——先 `SetWindowPos(..., SWP_NOACTIVATE)` 让窗口可见
+且置顶，需要焦点时才另外调 `SetForegroundWindow`。这条「可见但无焦点」的路径不触发前台锁。
 
-> **一处推理修正：** 我最初把「前台锁拒绝」写成了普遍结论。但当时那组实验**并未真正
-> 制造出「其他应用持续持有前台」的状态**——最小化 DSH 之后，前台其实又回到了 DSH 自己
-> （日志：`foregroundPid(before)=35192`，即 DSH）。把边界情形当成常态，会让人以为置顶
-> 基本不可用，从而**错误地放弃一个实际可用的功能**。分开测量后才是上表的样子。
+**实测（用户正在 Chrome 里工作、前台锁生效、且从命令行直接运行因而没有任何激活权——
+条件最差的情形）：**
+
+```
+foregroundPid(before) = 14064            （Chrome 持有前台）
+SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE|SWP_SHOWWINDOW) = True
+用户确认：DSH 窗口出现在 Chrome 之上，约 10 秒可见
+```
+
+**本项目的实际需求就是「用户能看见窗口」**（点通知 → 看到哪个会话需要我），
+因此这条可靠路径足以支撑核心功能；前台焦点只是可选加分项。
+
+**`AllowSetForegroundWindow` 转交前台权的方案已否决**：实测首次成功、复现失败。文档
+说明原因是该权利会被用户的**下一条输入**撤销，机制本身不可依赖。
+
+**七种抢焦点手法实测全部无效**：直调 `SetForegroundWindow`、`AllowSetForegroundWindow`
+后再调、先最小化再还原、`BringWindowToTop` 循环、`AttachThreadInput`（返回 `False`）、
+`SwitchToThisWindow`、以及带 `SWP_NOACTIVATE` 的 `SetWindowPos`（它不抢焦点，只抬起）。
+
+> **两处必须记录的推理修正：**
+> 1. 我先把「前台锁拒绝」写成了普遍结论。但当时那组实验**并未真正制造出「其他应用持续
+>    持有前台」的状态**——最小化 DSH 之后前台其实又回到了 DSH 自己。把边界情形当成常态，
+>    会让人**错误地放弃一个实际可用的功能**。
+> 2. 随后我又把「转交授权后首次成功」当成了稳定机制，直到**复现失败**才放弃。
+>    教训：单次成功不足以确立机制，必须复现。
+>
+> 另外，「置顶后前台归属会变成 DSH」这一现象实测出现过，但**不可靠**，不作为设计依据。
+
+**置顶必须可逆**：`HWND_TOPMOST` 不复位会长期压住其他窗口，用后必须 `HWND_NOTOPMOST`。
 
 **关键区分：还原与置顶是两件事。** 前台锁拒绝切换时，窗口仍然被正确还原
 （`158x26 → 1721x927`，保持最大化形态）。把两者混成一个结论会掩盖真实缺陷。
-前置条件也必须写清：本节的结论都要求**窗口定位走 `EnumWindows`**——用
-`Process.MainWindowHandle` 在窗口隐藏时取到 0，会误判为「窗口已销毁」。
+另有一条前置条件：窗口定位必须走 `EnumWindows`——`Process.MainWindowHandle` 在窗口
+隐藏时为 0，会误判为「窗口已销毁」。
 
 ### 投递方式改为无控制台的外部启动器
 

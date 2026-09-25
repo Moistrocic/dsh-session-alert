@@ -102,16 +102,37 @@ internal static class DshFocusHelper
         return best;
     }
 
+    /// 从被激活的 URL 里取出会话 id。
+    ///
+    /// 协议激活时 Windows 把 URL 作为**第 1 个位置参数**原样传入（实测形如
+    /// `dshalert://open/?session=xxx`，且未必与注册时写的完全一致——系统会做
+    /// 规范化，例如补上结尾斜杠）。因此不能只找 `--session` 这种显式开关，
+    /// 必须同时能从 URL 的查询串里解析。
+    private static string ParseSession(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            string a = args[i];
+            if (string.Equals(a, "--session", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                return args[i + 1];
+
+            int q = a.IndexOf("session=", StringComparison.OrdinalIgnoreCase);
+            if (q < 0) continue;
+            string rest = a.Substring(q + "session=".Length);
+            int end = rest.IndexOfAny(new[] { '&', '#', ' ' });
+            string value = end < 0 ? rest : rest.Substring(0, end);
+            if (value.Length > 0) return Uri.UnescapeDataString(value);
+        }
+        return "";
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
         _logPath = Path.Combine(Path.GetTempPath(), "dsh-focus-helper.log");
 
-        string session = "";
-        for (int i = 0; i < args.Length - 1; i++)
-        {
-            if (string.Equals(args[i], "--session", StringComparison.OrdinalIgnoreCase)) session = args[i + 1];
-        }
+        string session = ParseSession(args);
+        Log("rawArgs=[" + string.Join(" | ", args) + "]");
 
         Log("=== invoked; session='" + session + "' ===");
 
@@ -125,6 +146,11 @@ internal static class DshFocusHelper
 
         IntPtr hwnd = FindLargestWindow(pids);
         if (hwnd == IntPtr.Zero) { Log("FAIL: 未枚举到有标题的顶层窗口"); return 2; }
+
+        // 会话 id 来自协议激活时系统填入的 URL 查询参数（形如 <scheme>://open/?session=xxx）。
+        // 记录它，是为了证明「切到指定会话」这个增强项在参数传递上可行——后台切换
+        // 会话需要把 id 交给插件，先确认它确实能送达。
+        Log("sessionId='" + session + "'");
 
         uint targetPid = PidOf(hwnd);
         bool wasVisible = IsWindowVisible(hwnd);
