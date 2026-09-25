@@ -112,8 +112,9 @@ ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]   // dsh-hmr 的 Config
 | 场景 | 状态 | 证据 |
 | --- | --- | --- |
 | `turnEnd` | ✅ 早已观测 | 信号表 `turn/end:completed` → `suppressed:chime-only` |
-| `question` | ✅ **已观测** | `17:31:40 user-questions/request → sent:card+button`；用户确实收到卡片并作答 |
+| `question` | ✅ **两次观测** | `17:31:40 user-questions/request → sent:card+button`（用户在焦点外，收到卡片并作答）；`17:42:08` 同源事件 → `suppressed:chime-only`（用户在焦点内，卡片扣下、只响铃） |
 | `error` | ✅ **已观测（两条路径）** | `17:34:51 api-session/error` 与 `turn/end:error` **同时**到达，都判为 `skipped:not-a-root-session`（子代理会话，正确静默） |
+| 「用户打断 → 不提醒」 | ✅ **已观测** | `17:43:35 turn/end:aborted-by-user → skipped:user-interrupted`（`skipAbortedTurns` 在真实打断上生效，不再只是接线测试里的合成事件） |
 | `approval` | ⛔ **仍未观测** | 当前审批策略是 `never`，DSH 根本不会发出 `approval/request`。见第七节 |
 
 `question` 的观测还顺带确认了一件重要的事：**waterfall 修复在运行环境里生效了**——
@@ -195,18 +196,78 @@ DSH · 未知会话 正在等待你的回答：          ← 会话名退化成�
 
 ---
 
-## 七、尚未完成（只剩两项）
+## 七、尚未完成（只剩两项，都已准备好验收步骤）
 
-1. **`approval` 的真实观测。** 需要用户把审批策略临时改回 `ask`，然后触发一次需要授权的
-   工具调用。当前策略是 `never`，DSH 不会发出 `approval/request`，因此这条**无法在不改策略的
-   前提下完成**——这不是代码问题。
-   接线的离线验证是齐的（`npm test` 的 `approval 载荷按真实契约解析` + 接线检查的
-   `工具待授权 -> approval`），缺的只是「真实环境里它会不会到达」。
-2. **`lib/index.js` 的两处改动尚未在运行环境生效**（需要重启 DSH）：
-   - `question` / `approval` 监听器的载荷字段修复（上面第五条，已修，未生效）
-   - `/state` 新增的 `clients.styles`（样式读数经 Host 暴露）
-   重启后应能看到：`GET /state` 的 `clients.styles[0].report.injected === true`，
-   以及下一次真实提问的通知正文里出现**会话名与问题原文**。
+### 0. 先跑这一条命令——它会告诉你还有什么没生效
+
+```powershell
+node experiments/post-restart-check.mjs      # 退出码 0 = 所有「应当生效」的都生效了
+```
+
+它逐项判定并打印原因：Host 半边可达、客户端半边在线、**样式读数经 `/state` 暴露**
+（injected / tags / rules / 实测 `display`）、**运行中的 client bundle 与磁盘逐字节相同**、
+信号表汇总，以及 question 正文修复是否生效、approval 是否已观测到。
+**「应当生效却没生效」才让它失败**；「approval 尚未观测」是信息项，不影响退出码
+（重启后 `recent` 与信号表都会清空，所以它一开始必然报「尚未观测」）。
+
+### 1. 重启后要验证的两处 Host 侧改动
+
+磁盘上有两处 `lib/index.js` 的修改**尚未在运行环境生效**（用户将在方便时重启，并在新会话里测试）：
+
+```powershell
+# 一、样式读数经 Host 暴露（重启后应出现 clients.styles，且 injected=true）
+curl.exe -s http://127.0.0.1:19387/api/dsh-session-alert/state |
+  Select-String -Pattern '"styles"'
+
+# 二、载荷字段修复：随便问一次问题，然后看通知正文里有没有会话名与问题原文
+#     （修复前是「… · 未知会话 正在等待你的回答：」——会话名退化、摘要在冒号后面为空）
+curl.exe -s http://127.0.0.1:19387/api/dsh-session-alert/state |
+  Select-String -Pattern '等待你的回答'
+```
+
+`clients.styles[0].report` 的期望形状：
+`{ injected: true, tags: 1, dynTags: 0, chars: 7459, rules: 68, applied: { display: 'flex', gap: '16px', fontSize: '13px' } }`
+
+### 2. `approval` 的真实观测（**只能在新会话里做，且必须先改审批策略**）
+
+**为什么它至今没被观测到——这不是代码问题，是配置问题**（两条都查证过）：
+
+- `@deepseek-ai/dsh-user-approval` 的 README 写明：`never` 策略「rejects every request
+  **deterministically before interactive dispatch**」。也就是说策略为 `never` 时
+  `approval/request` **根本不会被发出**，插件再正确也收不到。
+- `sandbox_permissions` 升级那条路在本会话里走不通：`@deepseek-ai/dsh-sandbox` 的
+  `WIDER_MODES = { 'read-only': ['workspace-write','danger-full-access'],
+  'workspace-write': ['danger-full-access'] }` —— 而本会话的文件策略已是
+  **danger-full-access**（表顶），**没有更宽的可升级目标**，因此不会有升级请求。
+
+**那么谁会提出 `ask`**：`@deepseek-ai/dsh-experimental-auto-review`（**已在本 profile 的
+bundles 里**）。它在 `tools/pre-execute` 上做逐调用审查，判定不安全时返回
+`{ kind: 'ask', reason, displayReason }`，工具管线随即调用
+`ctx.approval.request({ agent, toolName, callId, reason, displayReason, signal })`
+——这正是 `approval/request` 的来源。
+
+**步骤**（每步都可判定）：
+
+1. 新会话里把会话的**审批策略改成 `ask`**（权限预设界面；`ask` 才是默认值，
+   当前被设成了 `never`）。**文件策略保持 danger-full-access 不用动**——本演练不需要升级沙箱。
+2. 让 Agent 跑一条**看起来有风险但绝对无害**的命令，好让 auto-review 拦下来。例如
+   先建一个临时文件、再删它：
+   ```powershell
+   New-Item "$env:TEMP\dsa-approval-drill.txt" -Force | Out-Null
+   Remove-Item "$env:TEMP\dsa-approval-drill.txt" -Force
+   ```
+   审查未拦下就换一条更"扎眼"的（例如带 `-Recurse` 的删除）——**拦不拦由审查模型决定，
+   所以这一步可能要多试一次**，这与插件无关。
+3. 判定「真的发生了授权请求」有**两条互相独立的证据**：
+   - 插件的信号表：`curl.exe -s http://127.0.0.1:19387/api/dsh-session-alert/state`
+     应出现一行 `approval/request`，verdict 为 `sent:card+button`（或抑制时 `sent:card-withheld`）；
+     活动列表里正文形如 `… · … 等待你的授权：工具 pwsh`。
+   - **会话日志本身**：`dsh-user-approval` 会往会话里追加一对
+     `approval/asked` / `approval/decided` 事件。它不依赖本插件，是更硬的证据。
+4. 事后**把审批策略改回 `never`**（用户原本的选择）。
+
+`approval` 场景的配置：`minIntervalSeconds: 30`（同一会话 30 秒内不重复），
+按钮文案是「去处理…」而不是「批准」——见 ADR 0006：插件**不代答**。
 
 ---
 
@@ -234,7 +295,8 @@ DSH · 未知会话 正在等待你的回答：          ← 会话名退化成�
 ```powershell
 npm test                                     # 60 条离线断言
 npm test -- --toast                          # 额外真发一条通知（真机冒烟）
-node experiments/events-wiring-check.mjs     # 事件接线（含真实载荷与 next() 断言）
+node experiments/post-restart-check.mjs      # 重启后先跑这条：逐项判定哪些修复已生效
+node experiments/events-wiring-check.mjs     # 事件接线（真实载荷 + 瀑布 next() 断言）
 node experiments/client-style-audit.mjs --mutate  # 样式注入审计 + 变异检查
 node experiments/settings-render-check.mjs   # 设置页渲染（自制替身，不是验收证据）
 node experiments/stylesheet-validate.mjs     # 注入的 CSS 是否合法

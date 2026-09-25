@@ -46,6 +46,7 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
 ```powershell
 npm test                                     # 60 条离线断言
 npm test -- --toast                          # 额外真发一条通知（真机冒烟）
+node experiments/post-restart-check.mjs      # 重启后先跑这条：逐项判定哪些修复已生效
 node experiments/events-wiring-check.mjs     # 事件接线（真实载荷 + 瀑布 next() 断言）
 node experiments/client-style-audit.mjs --mutate  # 样式注入审计 + 变异检查
 node experiments/stylesheet-validate.mjs     # 注入的 CSS 是否合法

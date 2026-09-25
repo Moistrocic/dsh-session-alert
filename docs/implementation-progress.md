@@ -113,9 +113,39 @@ ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]
 | 场景 | 状态 | 记录 |
 | --- | --- | --- |
 | `turnEnd` | ✅ | `17:22:39 turn/end:completed → suppressed:chime-only`（焦点抑制，`chimes: 1`） |
-| `question` | ✅ | `17:31:40 user-questions/request → sent:card+button`；用户确实收到卡片并作答 |
+| `question` | ✅ 两次 | `17:31:40 → sent:card+button`（焦点外，收到卡片并作答）<br>`17:42:08 → suppressed:chime-only`（焦点内，卡片扣下、只响铃） |
 | `error` | ✅ 两条路径 | `17:34:51 api-session/error → skipped:not-a-root-session`<br>`17:34:51 turn/end:error → skipped:not-a-root-session` |
-| `approval` | ⛔ | 审批策略为 `never`，DSH 不发出 `approval/request` |
+| 用户打断 | ✅ | `17:43:35 turn/end:aborted-by-user → skipped:user-interrupted`（真实打断上验证 `skipAbortedTurns`，不再只是合成事件） |
+| `approval` | ⛔ | 审批策略为 `never`，DSH 不发出 `approval/request`（原因与可复现步骤见下） |
+
+后两条值得单独说一句：`suppressed:chime-only` 与 `skipped:user-interrupted` 都是**真实事件**
+在真实环境里落下来的判决，而不是接线测试喂出来的。前者证明「专注时扣卡片但保留听觉通道」，
+后者证明「用户自己掐掉的轮次不打扰他」——这两条恰恰是设计上最容易被误做成噪音的地方。
+
+### `approval` 为什么观测不到——是配置问题，不是代码问题
+
+两条都查证过，不是推测：
+
+1. `@deepseek-ai/dsh-user-approval/README.md` 写明策略 `never` 会
+   「rejects every request **deterministically before interactive dispatch**」——
+   即 `approval/request` **不会被发出**，插件再正确也收不到。
+2. `sandbox_permissions` 升级这条路在本会话里走不通：`@deepseek-ai/dsh-sandbox` 的
+   `WIDER_MODES = { 'read-only': ['workspace-write','danger-full-access'],
+   'workspace-write': ['danger-full-access'] }`。本会话文件策略已是 **danger-full-access**
+   （表顶），**没有更宽的可升级目标**，因此没有升级请求可提。
+
+谁会提出 `ask`：`@deepseek-ai/dsh-experimental-auto-review`（**已在本 profile 的 bundles 里**）。
+它在 `tools/pre-execute` 上逐调用审查，判定不安全时返回 `{ kind: 'ask', reason, displayReason }`，
+工具管线随即 `ctx.approval.request({ agent, toolName, callId, … })` —— 这就是 `approval/request`
+的来源。完整演练步骤写在 `HANDOFF.md` 第七节（含「改用会话日志里的
+`approval/asked` / `approval/decided` 作为不依赖本插件的独立证据」）。
+
+顺带记两条与 ADR 0006 相关的契约事实（都来自源码，不是推测）：
+
+- 审批通道要求**开放中的轮次**：`approval.request()` 在轮次之外会抛
+  「must be turn-enclosed」，因此演练必须在一次真实工具调用里发生。
+- `approval.request()` 会先向会话追加 `approval/asked`，决定后追加 `approval/decided`。
+  **这给了我们一条独立于插件的证据通道。**
 
 `question` 的观测还确认了 **waterfall 修复在运行环境真的生效**：用户收到了那个问题并作答
 （旧代码会否决整条提问链，问题根本不会出现）。
