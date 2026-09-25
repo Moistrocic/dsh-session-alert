@@ -113,39 +113,60 @@ ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]
 | 场景 | 状态 | 记录 |
 | --- | --- | --- |
 | `turnEnd` | ✅ | `17:22:39 turn/end:completed → suppressed:chime-only`（焦点抑制，`chimes: 1`） |
-| `question` | ✅ 两次 | `17:31:40 → sent:card+button`（焦点外，收到卡片并作答）<br>`17:42:08 → suppressed:chime-only`（焦点内，卡片扣下、只响铃） |
+| `question` | ✅ 三次 | `17:31:40 → sent:card+button`（焦点外，收到卡片并作答）<br>`17:42:08 → suppressed:chime-only`（焦点内，卡片扣下、只响铃）<br>`18:07:33 → sent:card+button`（**重启后**，用于验证载荷修复） |
 | `error` | ✅ 两条路径 | `17:34:51 api-session/error → skipped:not-a-root-session`<br>`17:34:51 turn/end:error → skipped:not-a-root-session` |
-| 用户打断 | ✅ | `17:43:35 turn/end:aborted-by-user → skipped:user-interrupted`（真实打断上验证 `skipAbortedTurns`，不再只是合成事件） |
-| `approval` | ⛔ | 审批策略为 `never`，DSH 不发出 `approval/request`（原因与可复现步骤见下） |
+| 用户打断 | ✅ 两次 | `17:43:35`、`18:06:57` 的 `turn/end:aborted-by-user → skipped:user-interrupted` |
+| **`approval`** | ✅ **已观测** | `18:09:20 approval/request → suppressed:chime-only`，正文 `… · 对齐桌面版继续未完成任务 等待你的授权：工具 pwsh` |
 
-后两条值得单独说一句：`suppressed:chime-only` 与 `skipped:user-interrupted` 都是**真实事件**
-在真实环境里落下来的判决，而不是接线测试喂出来的。前者证明「专注时扣卡片但保留听觉通道」，
-后者证明「用户自己掐掉的轮次不打扰他」——这两条恰恰是设计上最容易被误做成噪音的地方。
+**四类事件至此全部在真实会话中观测到。** 三条值得单独说：
 
-### `approval` 为什么观测不到——是配置问题，不是代码问题
+- `suppressed:chime-only` 与 `skipped:user-interrupted` 都是**真实事件**在真实环境里落下的判决，
+  而不是接线测试喂出来的。前者证明「专注时扣卡片但保留听觉通道」，后者证明「用户自己掐掉的
+  轮次不打扰他」——这两条恰恰是设计上最容易被误做成噪音的地方。
+- 重启后 `18:07:33` 那条把**载荷修复**验证了：正文含会话名（`对齐桌面版继续未完成任务`）、
+  问题原文、以及 `（共 2 个问题）`。修复前是 `DSH · 未知会话 正在等待你的回答：`（空摘要）。
+- `18:09:20` 的 approval 那条同样含会话名与工具名，而且**用户批准之后那条被升级的命令真的执行了**。
+  若瀑布监听器仍在否决链路，审批走不到应答者，工具会直接失败——因此这是审批链上对
+  waterfall 修复的独立确认。
 
-两条都查证过，不是推测：
+### `approval` 的可复现配方（**已实测跑通**）
 
-1. `@deepseek-ai/dsh-user-approval/README.md` 写明策略 `never` 会
-   「rejects every request **deterministically before interactive dispatch**」——
-   即 `approval/request` **不会被发出**，插件再正确也收不到。
-2. `sandbox_permissions` 升级这条路在本会话里走不通：`@deepseek-ai/dsh-sandbox` 的
+**先说为什么此前观测不到——不是代码问题，是配置问题**（两条都查证过）：
+
+1. `@deepseek-ai/dsh-user-approval/README.md`：策略 `never` 会「rejects every request
+   **deterministically before interactive dispatch**」——即 `approval/request`
+   **根本不会被发出**，插件再正确也收不到。
+2. `sandbox_permissions` 升级那条路在 `danger-full-access` 下走不通：
+   `@deepseek-ai/dsh-sandbox` 的
    `WIDER_MODES = { 'read-only': ['workspace-write','danger-full-access'],
-   'workspace-write': ['danger-full-access'] }`。本会话文件策略已是 **danger-full-access**
-   （表顶），**没有更宽的可升级目标**，因此没有升级请求可提。
+   'workspace-write': ['danger-full-access'] }` —— 表顶没有更宽的目标可升级，
+   因此不会产生升级请求。
 
-谁会提出 `ask`：`@deepseek-ai/dsh-experimental-auto-review`（**已在本 profile 的 bundles 里**）。
-它在 `tools/pre-execute` 上逐调用审查，判定不安全时返回 `{ kind: 'ask', reason, displayReason }`，
-工具管线随即 `ctx.approval.request({ agent, toolName, callId, … })` —— 这就是 `approval/request`
-的来源。完整演练步骤写在 `HANDOFF.md` 第七节（含「改用会话日志里的
-`approval/asked` / `approval/decided` 作为不依赖本插件的独立证据」）。
+**跑通的三步**（每步都可判定）：
 
-顺带记两条与 ADR 0006 相关的契约事实（都来自源码，不是推测）：
+1. 文件策略收窄一档到 `workspace-write`，审批策略设为 `ask`；
+2. 发一次带 `sandbox_permissions: 'danger-full-access'` + `justification` 的调用
+   —— 沙箱层会在**执行之前**把这个升级请求交给审批通道；
+3. 判定：`/state` 信号表出现 `approval/request`，且活动列表里有渲染好的正文。
+   独立证据：`dsh-user-approval` 会向会话追加一对 `approval/asked` / `approval/decided`。
 
-- 审批通道要求**开放中的轮次**：`approval.request()` 在轮次之外会抛
-  「must be turn-enclosed」，因此演练必须在一次真实工具调用里发生。
-- `approval.request()` 会先向会话追加 `approval/asked`，决定后追加 `approval/decided`。
-  **这给了我们一条独立于插件的证据通道。**
+顺带**排除了一条曾以为可行的路**：`@deepseek-ai/dsh-experimental-auto-review` 的审查闸门
+只在会话预设等于 `AUTO_PRESET` 时才生效（源码：`if (permissionPresets.current(agent.session)
+!== AUTO_PRESET) return next()`），所以「随便跑一条扎眼命令等它拦下来」并不可靠；
+`sandbox_permissions` 升级才是稳定触发的那条。
+
+**一个环境事实**：在**本机**把文件策略收窄到 `workspace-write` 之后，**每一条命令都失败**，报
+`SetNamedSecurityInfoW failed (Win32 5): grantWrite(C:\Code\Projects\dsh-session-alert)`
+——沙箱授予工作区写权限时被拒（Win32 5 = 拒绝访问）。演练期间那条命令因此必须走升级路径，
+而这恰好就是触发 `approval/request` 的那一步。（文件类操作不受影响：`edit`/`write` 在
+workspace-write 下正常，这一点也实测过。）
+
+与 ADR 0006 相关的两条契约事实（来自源码）：
+
+- 审批通道要求**开放中的轮次**：`approval.request()` 在轮次之外会抛「must be turn-enclosed」，
+  因此演练必须发生在一次真实工具调用里。
+- `approval.request()` 先追加 `approval/asked`，决定后追加 `approval/decided`
+  —— **这条独立于插件的证据通道**留给以后核对用。
 
 `question` 的观测还确认了 **waterfall 修复在运行环境真的生效**：用户收到了那个问题并作答
 （旧代码会否决整条提问链，问题根本不会出现）。
@@ -376,6 +397,14 @@ mode 表里查不到的事件会让审计**失败**而不是跳过，以免新�
 仍会被它否决**。这不是可以「稍后处理」的事，已当面告知用户。
 
 ## 尚未完成
+
+> **以下四项已在第二轮全部了结**（保留原文以显示当时的判断口径，逐条对应见上方第二轮记录）：
+> 1. 三类事件 → `question`/`error`/`approval` **都已在真实会话中观测到**；
+> 2. 设置页样式 → 人眼确认「正常了」+ 截图 + 机器读数（根因是 CSS 从未进文档，见第二轮）；
+> 3. 铃声 → 用户确认听到；
+> 4. 审批控件形态 → 仍为 ADR 0006 的不代答设计，且 18:09:20 那次真实审批验证了它。
+>
+> 第二轮另外发现并修掉了三处：样式注入死路、载荷字段读错、`npm test` 误写注册表。
 
 1. **另三类事件的真实环境观测**：接线已用逐场景隔离测试验证通过（见「已确证」），
    但 `question` / `approval` / `error` 尚未在真实会话中各自触发一次。

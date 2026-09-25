@@ -7,10 +7,20 @@
 
 ## 一、当前状态（一句话）
 
-**设置页样式的根因已定位并修复，且经人眼确认；四类事件里三类已在真实会话中观测到；
-焦点抑制下的铃声已由用户确认听到。当前只剩两项待办，都不阻塞使用。**
+**原定的四项待办已全部了结：设置页样式的根因已定位、修复并三重复核；
+四类事件（`turnEnd` / `question` / `approval` / `error`）全部在真实会话中观测到；
+焦点抑制下的铃声已由用户确认听到；文档已更新。磁盘与运行环境一致，`npm test` 60/60。**
 
 「设置页为什么不好看」这个卡了两轮的问题，答案是：**CSS 从来没有进过文档**。
+
+验证的分量分布（这也是接手时最该知道的一件事）：
+
+| 结论 | 靠什么站住 |
+| --- | --- |
+| 样式已注入且生效 | 机器读数（`/state` 的 `clients.styles`：1 标签 / 68 规则 / `dynTags: 0`）+ 用户读设置页诊断区确认 `display=flex gap=16px` |
+| 四类事件到达 | `/state` 信号表 + 渲染后的通知正文 + 用户当场作答/批准 |
+| 代码就是页面收到的那份 | 从 HTTP 取回 bundle 与磁盘 `lib/client.js` **逐字节**比对 |
+| 改坏了会被发现 | 12 条新断言，含 4 条变异断言（去掉注入、改回死路、改错字段、改错会话来源） |
 
 ---
 
@@ -114,16 +124,47 @@ ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]   // dsh-hmr 的 Config
 | `turnEnd` | ✅ 早已观测 | 信号表 `turn/end:completed` → `suppressed:chime-only` |
 | `question` | ✅ **两次观测** | `17:31:40 user-questions/request → sent:card+button`（用户在焦点外，收到卡片并作答）；`17:42:08` 同源事件 → `suppressed:chime-only`（用户在焦点内，卡片扣下、只响铃） |
 | `error` | ✅ **已观测（两条路径）** | `17:34:51 api-session/error` 与 `turn/end:error` **同时**到达，都判为 `skipped:not-a-root-session`（子代理会话，正确静默） |
-| 「用户打断 → 不提醒」 | ✅ **已观测** | `17:43:35 turn/end:aborted-by-user → skipped:user-interrupted`（`skipAbortedTurns` 在真实打断上生效，不再只是接线测试里的合成事件） |
-| `approval` | ⛔ **仍未观测** | 当前审批策略是 `never`，DSH 根本不会发出 `approval/request`。见第七节 |
+| 「用户打断 → 不提醒」 | ✅ **两次观测** | `17:43:35` 与 `18:06:57` 的 `turn/end:aborted-by-user → skipped:user-interrupted`（`skipAbortedTurns` 在真实打断上生效，不再只是合成事件） |
+| **`approval`** | ✅ **已观测（18:09:20）** | `approval/request → suppressed:chime-only`，正文 `dsh-session-alert · 对齐桌面版继续未完成任务 等待你的授权：工具 pwsh` |
 
-`question` 的观测还顺带确认了一件重要的事：**waterfall 修复在运行环境里生效了**——
-用户真的收到了那个问题并作了答（旧代码会把整条提问链否决掉，问题根本不会出现）。
+**四类事件至此全部在真实会话中观测到。** 重启之后这一轮还把两处 Host 侧修复一并验证了：
+
+```
+18:07:33  user-questions/request  sent:card+button       session=session-d004
+   正文：… · 对齐桌面版继续未完成任务 正在等待你的回答：<问题原文>（共 2 个问题）
+18:09:20  approval/request        suppressed:chime-only  session=session-d004
+   正文：… · 对齐桌面版继续未完成任务 等待你的授权：工具 pwsh
+```
+
+修复前这两条都会是「未知会话」且摘要在冒号后为空。现在**会话名、问题原文、工具名都在**，
+`（共 2 个问题）` 那句数量提示也在——说明 `questions[]` 数组被正确读了。
+
+`approval` 那次还顺带证明了 **waterfall 修复在审批链上同样生效**：用户批准之后，
+那条被升级的命令**真的执行了**。若监听器仍然否决链路，审批走不到应答者，工具会直接失败。
+
+`question` 的观测也确认了同一件事：**用户真的收到了那个问题并作了答**
+（旧代码会把整条提问链否决掉，问题根本不会出现）。
 
 `error` 的触发方式是可复现的：用 `workflow` 让一个子代理指向不存在的模型名，
 于是子代理的 LLM 请求失败 → `agent/error` → `api-session/error`，
 同轮还会落下一条持久的 `turn/end:error`。**一次故障，两条路径各自被记录**，
 这比「接线测试说它接上了」强得多。
+
+`approval` 的可复现配方（**已实测跑通**，比猜「auto-review 会拦什么」可靠）：
+
+1. 会话的文件策略改成**比 `danger-full-access` 窄**的一档（本次是 `workspace-write`）；
+   审批策略改成 `ask`。两者缺一不可——`dsh-sandbox` 的
+   `WIDER_MODES = { 'read-only': [workspace-write, danger-full-access], 'workspace-write': [danger-full-access] }`
+   决定了「表顶没有更宽的目标可升级」，所以 `danger-full-access` 下不会有升级请求。
+2. 让 Agent 发一次带 `sandbox_permissions: 'danger-full-access'` + `justification` 的调用。
+   沙箱层会在**执行之前**把这个升级请求交给审批通道 → `approval/request` 触发。
+3. 判定：`/state` 的信号表出现 `approval/request`，且活动列表里有渲染好的正文。
+   独立证据：`dsh-user-approval` 会向会话追加 `approval/asked` / `approval/decided` 一对事件。
+
+**顺带记一个环境事实**：在**本机**把文件策略收窄到 `workspace-write` 后，**每一条命令都失败**，
+报 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(C:\Code\Projects\dsh-session-alert)`
+——沙箱要授予工作区写权限时被拒（Win32 5 = 拒绝访问）。也就是说演练期间那条命令必须走升级路径，
+这反而正好是触发 `approval/request` 的那一步。
 
 ### 铃声：已由用户确认听到
 
@@ -196,78 +237,50 @@ DSH · 未知会话 正在等待你的回答：          ← 会话名退化成�
 
 ---
 
-## 七、尚未完成（只剩两项，都已准备好验收步骤）
+## 七、完成状态（截至本次交接，全部待办已了）
 
-### 0. 先跑这一条命令——它会告诉你还有什么没生效
+### 0. 先跑这一条命令——它会告诉你哪些修复已在运行环境生效
 
 ```powershell
 node experiments/post-restart-check.mjs      # 退出码 0 = 所有「应当生效」的都生效了
 ```
 
 它逐项判定并打印原因：Host 半边可达、客户端半边在线、**样式读数经 `/state` 暴露**
-（injected / tags / rules / 实测 `display`）、**运行中的 client bundle 与磁盘逐字节相同**、
+（injected / tags / rules / 实测 `display`）、`dynTags` 是否为 0（非零就说明有人把
+`styles.insert` 那条死路加了回来）、**运行中的 client bundle 与磁盘逐字节相同**、
 信号表汇总，以及 question 正文修复是否生效、approval 是否已观测到。
-**「应当生效却没生效」才让它失败**；「approval 尚未观测」是信息项，不影响退出码
-（重启后 `recent` 与信号表都会清空，所以它一开始必然报「尚未观测」）。
 
-### 1. 重启后要验证的两处 Host 侧改动
+**只有「应当生效却没生效」才让它失败。** 三种情形走信息项、不影响退出码：
+`applied` 为 null（设置页没打开，无从测量）、question 尚未发生、approval 尚未观测。
+（这三种都曾经被第一版误报成失败——**假失败和假通过一样有害**，它会让人去修一个正确的地方。）
 
-磁盘上有两处 `lib/index.js` 的修改**尚未在运行环境生效**（用户将在方便时重启，并在新会话里测试）：
+### 1. 两处 Host 侧改动：**已生效并已实测**
 
-```powershell
-# 一、样式读数经 Host 暴露（重启后应出现 clients.styles，且 injected=true）
-curl.exe -s http://127.0.0.1:19387/api/dsh-session-alert/state |
-  Select-String -Pattern '"styles"'
+重启（17:45:16）之后：
 
-# 二、载荷字段修复：随便问一次问题，然后看通知正文里有没有会话名与问题原文
-#     （修复前是「… · 未知会话 正在等待你的回答：」——会话名退化、摘要在冒号后面为空）
-curl.exe -s http://127.0.0.1:19387/api/dsh-session-alert/state |
-  Select-String -Pattern '等待你的回答'
-```
+| 改动 | 实测证据 |
+| --- | --- |
+| `/state` 新增 `clients.styles` | `{"injected":true,"tags":1,"dynTags":0,"chars":7459,"rules":68,"applied":null}` |
+| `question` 载荷字段 | `18:07:33 → sent:card+button`，正文含**会话名 + 问题原文 + （共 2 个问题）** |
+| `approval` 载荷字段 | `18:09:20 → suppressed:chime-only`，正文含**会话名 + 工具名 `pwsh`** |
 
-`clients.styles[0].report` 的期望形状：
-`{ injected: true, tags: 1, dynTags: 0, chars: 7459, rules: 68, applied: { display: 'flex', gap: '16px', fontSize: '13px' } }`
+`applied` 那一位由**用户读了设置页诊断区**确认：`display=flex gap=16px font-size=13px`。
+它平时为 `null` 是设计如此——只有设置页渲染时 `.dsa-root` 才在文档里，那时才测得到。
 
-### 2. `approval` 的真实观测（**只能在新会话里做，且必须先改审批策略**）
+### 2. `approval` 的真实观测：**已完成**（配方见第四节末）
 
-**为什么它至今没被观测到——这不是代码问题，是配置问题**（两条都查证过）：
+不再是待办。可复现配方：文件策略收窄到 `workspace-write` + 审批策略 `ask` +
+一次带 `sandbox_permissions`/`justification` 的调用。三条独立证据都拿到了：
+插件的信号表与渲染正文、用户当场看到并批准了审批请求、以及那条命令**真的执行了**。
 
-- `@deepseek-ai/dsh-user-approval` 的 README 写明：`never` 策略「rejects every request
-  **deterministically before interactive dispatch**」。也就是说策略为 `never` 时
-  `approval/request` **根本不会被发出**，插件再正确也收不到。
-- `sandbox_permissions` 升级那条路在本会话里走不通：`@deepseek-ai/dsh-sandbox` 的
-  `WIDER_MODES = { 'read-only': ['workspace-write','danger-full-access'],
-  'workspace-write': ['danger-full-access'] }` —— 而本会话的文件策略已是
-  **danger-full-access**（表顶），**没有更宽的可升级目标**，因此不会有升级请求。
+### 3. 剩下可做但非必须的事（都不阻塞使用）
 
-**那么谁会提出 `ask`**：`@deepseek-ai/dsh-experimental-auto-review`（**已在本 profile 的
-bundles 里**）。它在 `tools/pre-execute` 上做逐调用审查，判定不安全时返回
-`{ kind: 'ask', reason, displayReason }`，工具管线随即调用
-`ctx.approval.request({ agent, toolName, callId, reason, displayReason, signal })`
-——这正是 `approval/request` 的来源。
-
-**步骤**（每步都可判定）：
-
-1. 新会话里把会话的**审批策略改成 `ask`**（权限预设界面；`ask` 才是默认值，
-   当前被设成了 `never`）。**文件策略保持 danger-full-access 不用动**——本演练不需要升级沙箱。
-2. 让 Agent 跑一条**看起来有风险但绝对无害**的命令，好让 auto-review 拦下来。例如
-   先建一个临时文件、再删它：
-   ```powershell
-   New-Item "$env:TEMP\dsa-approval-drill.txt" -Force | Out-Null
-   Remove-Item "$env:TEMP\dsa-approval-drill.txt" -Force
-   ```
-   审查未拦下就换一条更"扎眼"的（例如带 `-Recurse` 的删除）——**拦不拦由审查模型决定，
-   所以这一步可能要多试一次**，这与插件无关。
-3. 判定「真的发生了授权请求」有**两条互相独立的证据**：
-   - 插件的信号表：`curl.exe -s http://127.0.0.1:19387/api/dsh-session-alert/state`
-     应出现一行 `approval/request`，verdict 为 `sent:card+button`（或抑制时 `sent:card-withheld`）；
-     活动列表里正文形如 `… · … 等待你的授权：工具 pwsh`。
-   - **会话日志本身**：`dsh-user-approval` 会往会话里追加一对
-     `approval/asked` / `approval/decided` 事件。它不依赖本插件，是更硬的证据。
-4. 事后**把审批策略改回 `never`**（用户原本的选择）。
-
-`approval` 场景的配置：`minIntervalSeconds: 30`（同一会话 30 秒内不重复），
-按钮文案是「去处理…」而不是「批准」——见 ADR 0006：插件**不代答**。
+- **明暗两种主题下并排比较观感**：官方 practices 要求「与同类宿主页面并排比较」。
+  目前只在当前（深色 + 皮肤）主题下人眼确认过。
+- **让 Host 半边也热重载**：给 profile 的 hmr 条目加一条 patch，把插件路径移出
+  `**/node_modules` 忽略表。属于改用户 profile 全局配置，需先问过用户。
+- **`question` 场景一次问多个问题时的摘要文案**：现在是首题原文 + `（共 N 个问题）`，
+  已在实机验证；若想让每道题都出现在正文里，需要另做设计（模板只有一个 `{summary}`）。
 
 ---
 
