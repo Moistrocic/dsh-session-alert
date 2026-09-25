@@ -30,6 +30,9 @@ function check(label, condition, detail) {
 function freshHarness(config) {
   const handlers = new Map()
   const routes = []
+  // cordis 传入的作用域对象（`this`）。真实签名是 `(this: Scoped<Agent>, …)`，
+  // 因此处理器用 `this.agent.id` 取会话；替身必须提供它，否则测不到这条路径。
+  const scoped = { agent: { id: 'session-root-1' } }
   const ctx = {
     logger: { info: () => {}, warn: () => {} },
     effect: (fn) => { try { fn() } catch { /* 忽略 */ } ; return () => {} },
@@ -50,7 +53,7 @@ function freshHarness(config) {
   }
   // 关掉限流与抑制，让每个场景都能独立地走到投递
   apply(ctx, Object.assign({ suppressWhenFocused: false, rateLimit: { enabled: false } }, config || {}))
-  return { handlers, routes }
+  return { handlers, routes, ctxs: scoped }
 }
 
 /** 从插件的 /state 路由读回信号表与活动列表。 */
@@ -96,14 +99,16 @@ const cases = [
   },
   {
     label: 'Agent 提问 -> question',
-    fire: (h) => h.get('user-questions/request')({ agent: { id: 'session-root-1' }, request: { question: '要不要保留旧的迁移脚本？' } }),
+    // 真实签名：'user-questions/request'(this: Scoped<Agent>, request, next)
+    // 载荷就是 request 本身，**不带** {agent, request} 外壳；sessionId 取自 `this`。
+    fire: (h, scoped) => h.get('user-questions/request').call(scoped, { question: '要不要保留旧的迁移脚本？' }, () => {}),
     expectSource: 'user-questions/request',
     expectScenario: 'question',
     expectBodyHas: '要不要保留旧的迁移脚本',
   },
   {
     label: '工具待授权 -> approval',
-    fire: (h) => h.get('approval/request')({ agent: { id: 'session-root-1' }, request: { toolName: 'run_command' } }),
+    fire: (h, scoped) => h.get('approval/request').call(scoped, { toolName: 'run_command' }, () => {}),
     expectSource: 'approval/request',
     expectScenario: 'approval',
     expectBodyHas: 'run_command',
@@ -125,8 +130,9 @@ const cases = [
 
 console.log('=== 逐场景隔离验证 ===')
 for (const c of cases) {
-  const { handlers, routes } = freshHarness()
-  c.fire(handlers)
+  const { handlers, routes, ctxs } = freshHarness()
+  // 调用时带上 cordis 传入的作用域对象作为 `this`（真实签名是 `(this, …args)`）。
+  const result = c.fire(handlers, ctxs)
   await tick()
   const state = await readState(routes)
   if (state === null) { check(c.label, false, '读不到状态'); continue }
@@ -144,8 +150,49 @@ for (const c of cases) {
     || state.dispatch.recent.some((r) => String(r.body).includes(c.expectBodyHas))
   check(c.label, hasSignal && scenarioOk && bodyOk,
     `verdict=${verdict} 场景命中=${scenarioOk} 正文命中=${bodyOk}`)
+  void result
   if (bodyOk && state.dispatch.recent.length > 0) {
     console.log(`         正文: ${state.dispatch.recent[0].body}`)
+  }
+}
+
+// ---- 瀑布事件必须交出决定权 ----
+//
+// **这一组断言是本文件最重要的部分。**
+//
+// cordis 的契约（@deepseek-ai/cordis/lib/types/events.js）：
+//   "a listener that does not call `next()` vetoes the rest of the chain, including
+//    the built-in behavior."
+//
+// 本插件的 `user-questions/request` 与 `approval/request` 监听器曾经既不接收 `next`
+// 形参也不调用它，于是**把用户的提问与审批整条链都否决掉了**。
+// 而当时的接线测试没能发现它——因为它自己造了一个 `{agent, request}` 形状的载荷去喂
+// 处理器，形状与真实事件不一致，测试只证明了「我能喂饱我自己」。
+//
+// 因此这里显式断言：这两个监听器被调用后，`next` 必须**被调用过**。
+// 一个只观察的事件监听器若忘记了 next，后果是阻断真实功能，而它在功能测试里
+// 可能表现为「一切正常」（因为处理器确实跑了、也确实没报错）。
+console.log('\n=== 瀑布事件必须交出决定权（否则会否决真实功能）===')
+{
+  const waterfallCases = [
+    { event: 'user-questions/request', payload: { question: '要不要保留旧的迁移脚本？' } },
+    { event: 'approval/request', payload: { toolName: 'run_command' } },
+  ]
+  for (const wc of waterfallCases) {
+    const { handlers, ctxs } = freshHarness()
+    const handler = handlers.get(wc.event)
+    let nextCalls = 0
+    let returned
+    try {
+      returned = handler.call(ctxs, wc.payload, () => { nextCalls += 1; return 'CHAIN-RESULT' })
+    } catch (error) {
+      check(`${wc.event} 调用不抛错`, false, error.message)
+      continue
+    }
+    check(`${wc.event} 调用了 next()（不否决后续链）`, nextCalls === 1,
+      `next 被调用 ${nextCalls} 次 —— 为 0 表示这条链被否决，用户将看不到提问/审批`)
+    check(`${wc.event} 把 next() 的结果原样返回（不改写决定）`, returned === 'CHAIN-RESULT',
+      `返回值是 ${JSON.stringify(returned)}，期望透传 'CHAIN-RESULT'`)
   }
 }
 
