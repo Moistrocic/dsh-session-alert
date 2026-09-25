@@ -46,19 +46,72 @@ RESULT: raised=true reverted=True unchanged=True
 
 ## 尚未完成
 
-1. **另三类事件的真实环境观测**：接线已用**逐场景隔离测试**验证通过
-   （见下方「已确证 · 事件接线」），但 `question` / `approval` / `error` 尚未在真实会话中
-   各自触发一次。两者不重复：测试验证接线，真实观测验证「事件会不会到达」。
-2. **设置页到 GUI 里人工过一眼**：代码已实现、渲染路径已自检，但没有人眼确认过布局与交互。
-3. **焦点抑制的「实际听到铃声」**：逻辑已实测评测出 `suppressed:chime-only`（计数
+1. **设置页的「所有可见文本走 locale」还差一步。** 文本字典**已注册**进 DSH 的 locale
+   服务（`zh` + `en`），`text()` 取词函数也已就位并带本地表回退；但组件里的字符串
+   **仍是字面量**，尚未逐条改走 `text()`。不是缺陷，但离官方要求还差一步。
+2. **另三类事件的真实环境观测**：接线已用逐场景隔离测试验证通过（见「已确证」），
+   但 `question` / `approval` / `error` 尚未在真实会话中各自触发一次。
+   两者不重复：测试验证接线，真实观测验证「事件会不会到达」。
+3. **设置页重做样式后的人眼确认**：上一次人眼确认是针对**旧样式**的，结论是「很丑」。
+   新样式已按 DSH 原语重做并通过渲染自检，但还没被人眼看过。
+4. **焦点抑制的「实际听到铃声」**：逻辑已实测出 `suppressed:chime-only`（计数
    `chimes: 5`），但「用户确实听到」这一环未单独确认。
-4. **审批控件的最终形态**：已按 [ADR 0006](./adr/0006-approval-controls-do-not-decide.md)
+5. **审批控件的最终形态**：已按 [ADR 0006](./adr/0006-approval-controls-do-not-decide.md)
    改为不代答（文案「去处理…」），放弃了 ADR 0003 的代答设计——因为查证发现
    `approval.request` 是请求方调用 answerer 的入口，要求开放中的轮次与同进程，
    而本插件是轮次之外的外部进程。**这是目标的验收口径需要跟着更新的一处**：
    目标里写的是「按已定决策补齐……」，而这条决策在实现阶段被证据推翻了。
 
 ## 已确证
+
+### 设置页样式：从 DSH 的 UI 原语读出设计语言，而非自创
+
+用户反馈旧样式「很丑」。根因有两个，都不是审美问题：
+
+1. **说明文字没被包住。** `Toggle` 把 label 与 hint 平铺给 flex 容器，于是它们被排成
+   同一行：长句说明横向溢出、与相邻字段糊在一起（用户截图里可见）。现包进
+   `.dsa-toggle-text`。
+2. **样式是自创的。** 输入框用 padding 而非固定高度、圆角与描边宽度随手写、
+   没有 focus ring、错误色用错令牌。
+
+**正确做法**（官方 practices 参考原文）：不得 import `@deepseek-ai/dsh-client-ui-primitives`，
+而应「copy markup, CSS, and behavior from the primitive into the plugin」，
+「Rename copied classes under your plugin's prefix, keep only `--dsw-alias-*` token
+references」。
+
+据此对齐（数值来自抽出的 CSS，可复核）：
+
+| 元素 | DSH 的写法 |
+| --- | --- |
+| 输入框 | `height:32px`、`border:.5px solid --dsw-alias-border-l4`、`radius-md` |
+| 复选框行 | `inline-flex` + `gap:6px`、16×16、`accent-color:brand-primary`、`:has(input:disabled)` |
+| 按钮 | `height:36px`（sm 28px）、`radius-md`、`button-primary-fill` |
+| 场景切换 | Pill：`height:24px`、圆角 999px、选中 `button-ghost-active-fill` |
+| 卡片 | `settings-card-fill` / `settings-card-stroke` |
+
+新增用到而此前完全没用的令牌：`--dsw-radius-sm/md/lg`、`--dsw-focus-ring-width/color`、
+`--dsw-alias-border-l3/l4`、`--dsw-alias-interactive-bg-hover`、`--dsw-alias-label-dimmed`、
+`--dsw-alias-state-business-primary`、`--dsw-alias-button-ghost-active-fill/border`、
+`--dsw-alias-settings-card-fill/stroke`。
+
+「behavior」也补了：开关加 `role="switch"` + `aria-checked`，场景切换器加
+`role="tab"`/`aria-selected` 与容器 `role="tablist"` + `aria-label`。
+官方原文强调抄样式时不能只抄外观——这些是「users rely on」的行为。
+
+工具：[`experiments/extract-dsh-css.cjs`](../experiments/extract-dsh-css.cjs)
+从 app.asar 按原始字节抽出这些 CSS，使数值可随时复核而不是「照抄后失传」。
+
+### 界面文本已注册进 DSH 的 locale 服务
+
+`ctx.locale.register(ns, locale, dict)` 用**非类型化**形式（类型化形式要求
+`LocaleNamespaceMap` 里有声明，而那是 DSH 编译期的合并表，外部插件加不进去）。
+
+`zh` 与 `en` 都注册：DSH 只有这两个内置语言（`LOCALE_IDS = ["zh", "en"]`），
+且 `en` 是兜底语言——只注册 `zh` 的话，活动语言为 `en` 时所有键都会 miss 并退化成
+把键名当文本显示。两个字典内容相同，理由见代码注释（界面语言与通知内容是两件事）。
+
+一个坑：`register` 对同一 `(ns, locale)` 重复注册会抛（single occupant），
+插件热重载时就会遇到，因此包在 try 里并注明这是预期情况。
 
 ### 降级链：刻意演练四级全部真实发生
 
