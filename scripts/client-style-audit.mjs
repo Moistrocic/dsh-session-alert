@@ -46,10 +46,33 @@
  * data: URL 求值的计数器。
  *
  * `import()` 的缓存键就是 URL，而同一份源码算出的 base64 完全相同——因此**同一份源码
- * 跑第二次时模块不会重新求值**，`__ModuleLoader__.load` 不会再被调用。这个计数器把
- * 每次运行的 URL 岔开（见 `runClientHalf`）。
+ * 跑第二次时模块不会重新求值**，`__ModuleLoader__.load` 不会再被调用。
  */
 let runCounter = 0
+
+/**
+ * 为一份源码文本造一个**全局唯一**的 data: URL。
+ *
+ * ## 为什么不能只用一个自增计数器（这是刚踩过的坑）
+ *
+ * 真实症状：独立跑时全部通过，放进 `npm test` 就报「源码没有调用
+ * `window.__ModuleLoader__.load`」——看起来像源码坏了，其实是**模块缓存**：
+ * 本文件与 `client-behavior-audit.mjs` **各有各的计数器、都从 1 开始**，
+ * 于是第一次运行生成了一模一样的 data: URL，第二次 import 命中缓存、模块体根本没执行。
+ *
+ * 所以唯一性不能靠「某个模块自己的计数器」，要带进程与随机成分。这类缺陷特别费时间：
+ * 它只在「两个审计在同一进程里先后跑」时出现，也就是**只在 `npm test` 里出现**。
+ *
+ * @param {string} source - 源码文本。
+ * @returns {string} 可直接 `import()` 的 URL。
+ */
+export function uniqueSourceUrl(source) {
+  runCounter += 1
+  const marker = `${process.pid}-${Date.now()}-${runCounter}-${Math.random().toString(36).slice(2)}`
+  // 追加注释是安全的：它不改变语义，而且会被 stripComments 当成注释。
+  const marked = `${source}\n// audit-run:${marker}\n`
+  return `data:text/javascript;base64,${Buffer.from(marked, 'utf8').toString('base64')}`
+}
 
 /**
  * 审计用的最小 DOM 替身。只实现被用到的那些 API，遇到不认识的选择器**抛错**。
@@ -242,10 +265,10 @@ export async function runClientHalf(options) {
     // `__ModuleLoader__.load` 不会再被调用，症状是「源码没有调用 load」这种看着像
     // 源码坏了、其实是运行器坏了 的报错。因此在源码末尾追加一行唯一注释把 URL 岔开。
     // 追加注释是安全的：它不改变任何语义，而且被 `stripComments` 视为注释。
-    runCounter += 1
-    const marked = `${source}\n// audit-run:${runCounter}\n`
-    const dataUrl = `data:text/javascript;base64,${Buffer.from(marked, 'utf8').toString('base64')}`
-    await import(dataUrl)
+    // **必须用全局唯一的 URL**（`uniqueSourceUrl` 的注释里写了为什么：两个审计各自
+    // 从 1 开始的计数器会造出同一个 URL，于是在 `npm test` 里命中缓存、模块体不执行，
+    // 报出来的却是「源码没有调用 load」）。
+    await import(uniqueSourceUrl(source))
 
     if (definition === undefined) {
       error = new Error('源码没有调用 window.__ModuleLoader__.load')

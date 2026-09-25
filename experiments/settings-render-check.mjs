@@ -40,6 +40,7 @@
 // 再 import；不要试图 import 两次来"重新触发"注册。
 
 import { makeDom } from '../scripts/client-style-audit.mjs'
+import { makeReact, syncThenable } from '../scripts/client-react-stub.mjs'
 
 let failures = 0
 function check(label, condition, detail) {
@@ -108,83 +109,17 @@ const snapshot = {
   },
 }
 
-// ---- 替身 React：必须支持「状态更新后重新渲染」----
+// ---- 替身 React / thenable：复用 scripts/client-react-stub.mjs，不再写第二份 ----
 //
-// 这是本文件最关键的实现。最初我用 `useState: (init) => [init, () => {}]` 的替身，
-// 组件永远停在「正在读取插件状态…」——因为 snapshot 从未被写进去。
-// **那不是代码缺陷，是替身不会重渲染。**
+// 它跨渲染保留状态格与 `useRef` 盒子、按依赖数组决定效应是否重跑、并在卸载时逆序执行
+// 清理函数。为什么这三件事都必须有，见那个模块上方的注释——
+// 一句话：**替身少模拟一样东西，就会有一整类缺陷在它眼皮底下通过。**
 //
-// 真实 React 的流程是：渲染 → 跑 effect → fetch 完成 → setState → 重渲染。
-// 这里用「多次渲染 + 跨渲染保留的状态格 + 同步 thenable」复现这个循环：
-//   - 状态格**按组件隔离**并跨渲染保留，模拟 React 的 state 存活；
-//   - fetch 返回已 resolve 的 thenable，其 then 同步执行，因此 setState 在本次
-//     effect 内就落地，下一轮渲染即可见。
-//
-// **「按组件隔离」这一点我第一版漏了，而且症状极具误导性。** 当时用一个全局 cells
-// 数组，于是子组件 TemplateEditor 的 useState('turnEnd') 读到了父组件的第 0 个状态格
-// （也就是 snapshot 对象），active 变成对象 → 场景查找失败 → 组件返回 null。
+// 它最初就长在这个文件里，也是在这里踩过「状态格没按组件隔离」那个坑：
+// 当时用一个全局 cells 数组，子组件 TemplateEditor 的 useState('turnEnd') 读到了父组件的
+// 第 0 个状态格（也就是 snapshot 对象），active 变成对象 → 场景查找失败 → 组件返回 null。
 // 看起来像「模板编辑器有 bug」，实际是替身把两个组件的 hook 串了线。
 // **测试替身与生产代码一样需要被怀疑。**
-function makeReact() {
-  const stores = new WeakMap()
-  let currentStore = { cells: [] }
-  let cursor = 0
-  let effects = []
-  let dirty = false
-
-  function storeFor(Component) {
-    let store = stores.get(Component)
-    if (store === undefined) {
-      store = { cells: [] }
-      stores.set(Component, store)
-    }
-    return store
-  }
-
-  const react = {
-    createElement: (type, props, ...children) => ({ type, props: props || {}, children: children.flat() }),
-    useState: (init) => {
-      const store = currentStore
-      const index = cursor++
-      if (!(index in store.cells)) store.cells[index] = typeof init === 'function' ? init() : init
-      const setter = (value) => {
-        const next = typeof value === 'function' ? value(store.cells[index]) : value
-        // Object.is 语义：相同则不重渲染，避免无限循环。
-        if (!Object.is(next, store.cells[index])) {
-          store.cells[index] = next
-          dirty = true
-        }
-      }
-      return [store.cells[index], setter]
-    },
-    useEffect: (fn) => { effects.push(fn) },
-    useRef: () => ({ current: null }),
-  }
-
-  return {
-    react,
-    /** 渲染一次；返回元素树、本轮收集到的 effect，以及是否请求了重渲染。 */
-    render(Component, props) {
-      currentStore = storeFor(Component)
-      cursor = 0
-      effects = []
-      dirty = false
-      const tree = Component(props)
-      return { tree, effects, isDirty: () => dirty }
-    },
-  }
-}
-function syncThenable(value) {
-  const wrap = (v) => {
-    if (v !== null && typeof v === 'object' && typeof v.then === 'function') return v
-    return {
-      then(onFulfilled) { return wrap(onFulfilled(v)) },
-      catch() { return this },
-    }
-  }
-  return wrap(value)
-}
-
 const engine = makeReact()
 const react = engine.react
 
@@ -273,7 +208,7 @@ injected[0].cb()
 const reg = injected.find((r) => r.meta !== undefined)
 const Section = reg.comp
 
-// ---- 渲染直到稳定（模拟 React 的「effect -> setState -> 重渲染」循环）----
+// ---- 渲染直到稳定（模拟 React 的「渲染 → 提交 → setState → 重渲染」循环）----
 let tree = null
 let passes = 0
 try {
@@ -281,10 +216,10 @@ try {
     const result = engine.render(Section, {})
     tree = result.tree
     passes++
-    // 跑本轮的 effect（useEffect 在真实 React 里于渲染后执行）
-    for (const effect of result.effects) {
-      try { effect() } catch (error) { console.log('  effect 抛错:', error.message) }
-    }
+    // 提交：效应在这里跑（真实 React 也是渲染之后再跑 effect）。
+    // 依赖数组由替身比较，因此**重复提交不会让效应重跑**——这一点必须由替身保证，
+    // 否则「卸载时保存」这类逻辑在替身里会表现成「每渲染一次就存一次」。
+    try { result.commit() } catch (error) { console.log('  effect 抛错:', error.message) }
     if (!result.isDirty()) break
   }
 } catch (error) {
@@ -297,9 +232,7 @@ console.log(`  （渲染了 ${passes} 轮后稳定）`)
 /** 求值一个函数型子组件，返回它的元素树。 */
 function Component_renderSubtree(Component, props) {
   const result = engine.render(Component, props)
-  for (const effect of result.effects) {
-    try { effect() } catch { /* 子组件的 effect 失败不阻断遍历 */ }
-  }
+  try { result.commit() } catch { /* 子组件的 effect 失败不阻断遍历 */ }
   return result.tree
 }
 
@@ -333,6 +266,18 @@ check('向 locale 注册了字典', registeredLocaleDicts.length === 2,
   '实际注册 ' + registeredLocaleDicts.length + ' 条：' + JSON.stringify(registeredLocaleDicts))
 check('注册覆盖 zh 与 en（en 是 DSH 的兜底语言，缺它会退化成显示键名）',
   registeredLocaleDicts.some((d) => d.locale === 'zh') && registeredLocaleDicts.some((d) => d.locale === 'en'))
+
+// 设置页标签名：中文「会话通知」，其余语言（DSH 只有 en，且它是兜底语言）「Session Alert」。
+// 两组字典的**其余键刻意相同**——通知模板本身是中文的，理由见 client.js 的 TEXTS 注释。
+const zhDict = localeDicts.get('dsh-session-alert\u0000zh')
+const enDict = localeDicts.get('dsh-session-alert\u0000en')
+check('zh 字典的标题是「会话通知」', zhDict !== undefined && zhDict.title === '会话通知',
+  `实际 ${JSON.stringify(zhDict && zhDict.title)}`)
+check('en 字典的标题是「Session Alert」', enDict !== undefined && enDict.title === 'Session Alert',
+  `实际 ${JSON.stringify(enDict && enDict.title)}`)
+check('两份字典除标题外内容一致（通知模板是中文的，界面语言与通知内容是两件事）',
+  zhDict !== undefined && enDict !== undefined
+  && Object.keys(zhDict).filter((k) => k !== 'title').every((k) => zhDict[k] === enDict[k]))
 
 const all = texts.join(' | ')
 const hasClass = (c) => classNames.some((x) => x.split(' ').indexOf(c) >= 0)

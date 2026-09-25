@@ -28,9 +28,9 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
    官方明令**不得 import** `@deepseek-ai/dsh-client-ui-primitives`——
    正确做法是把 markup/CSS/behavior 抄进插件、类名加自己前缀、只留 `--dsw-alias-*` 令牌。
 
-## 写测试/替身时的第 4 条（本项目栽过四次）
+## 写测试/替身时的第 4 条（本项目栽过六次）
 
-**替身比生产代码更需要被怀疑。** 已发生的四种形态：
+**替身比生产代码更需要被怀疑。** 已发生的六种形态：
 
 | 形态 | 后果 |
 | --- | --- |
@@ -38,18 +38,22 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
 | 替身自造**载荷形状**（`{ question }` + `this.agent`） | 事件接线全绿，真机通知正文是「未知会话…」 |
 | 替身给 `this` 补上真机没有的 `agent` | 从 `this` 取会话的错误写法照样通过 |
 | 替身**忽略输入**（`sessionQuery` 不按 id 应答） | 「id 取错了」整类缺陷被遮住，变异没被抓到 |
+| 替身**少模拟一样 React 能力**（ref 不跨渲染、效应无依赖比较与清理） | 「切换/关闭设置页时保存」这条需求根本没法被验证 |
+| 两个审计**各自的自增计数器都从 1 开始** → 同一个 `data:` URL | `import()` 命中缓存、模块体没跑，报出来的却是「源码没调用 load」 |
 
-因此：替身只提供真实环境确实有的东西；输入要真的用上；每条关键断言都配一条
-**反向断言**（喂错误形状必须失败）。
+因此：替身只提供真实环境确实有的东西；输入要真的用上；**该模拟的能力一样不能少**；
+每条关键断言都配一条**反向断言**（喂错误形状必须失败）。
+唯一 URL 由 `uniqueSourceUrl()` 统一负责，别自己写计数器。
 
 ## 常用命令
 
 ```powershell
-npm test                                     # 60 条离线断言
+npm test                                     # 65 条离线断言
 npm test -- --toast                          # 额外真发一条通知（真机冒烟）
 node experiments/post-restart-check.mjs      # 重启后先跑这条：逐项判定哪些修复已生效
 node experiments/events-wiring-check.mjs     # 事件接线（真实载荷 + 瀑布 next() 断言）
-node experiments/client-style-audit.mjs --mutate  # 样式注入审计 + 变异检查
+node experiments/client-style-audit.mjs --mutate     # 样式注入审计 + 变异检查
+node experiments/client-behavior-audit.mjs --mutate  # 自动保存行为审计 + 变异检查
 node experiments/stylesheet-validate.mjs     # 注入的 CSS 是否合法
 node experiments/listener-mode-audit.mjs     # 监听器 dispatch-mode 审计
 node experiments/settings-render-check.mjs   # 设置页渲染（自制替身，不是验收证据）

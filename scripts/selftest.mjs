@@ -49,11 +49,16 @@ const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const notify = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'notify.js')).href)
 const contract = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'contract.js')).href)
+const configModule = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'config.js')).href)
 const { auditListenerModes, auditPackageListeners } = await import(
   pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'listener-mode-audit.mjs')).href
 )
 const { auditClientStyleInjection, makeDom, runClientHalf, stripComments } = await import(
   pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'client-style-audit.mjs')).href
+)
+// 客户端**行为**审计（自动保存 + 标签名本地化）。与 experiments/client-behavior-audit.mjs 共用。
+const { auditClientAutosave, sampleState } = await import(
+  pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'client-behavior-audit.mjs')).href
 )
 // 事件接线的替身环境与**真实载荷**。与 experiments/events-wiring-check.mjs 共用一份实现。
 const {
@@ -150,6 +155,38 @@ function harness(options = {}) {
 }
 
 // ---------------------------------------------------------------- 总开关 / 场景开关
+
+// 默认配置。这一组守的是**用户明确要求过的那几条默认值**——它们很容易在后续重构里
+// 被顺手改回去，而「默认值悄悄变了」不会有任何症状，只会让人以为插件坏了。
+test('默认配置：四个场景最短间隔一律 0（不限），显示时长按场景给（轮次结束 30 秒，其余常驻）', () => {
+  const config = contract.defaultConfig()
+
+  assert.deepEqual(
+    contract.SCENARIO_IDS.map((id) => config.scenarios[id].minIntervalSeconds),
+    [0, 0, 0, 0],
+    '四个场景的最短间隔都应当是 0',
+  )
+  // 逐场景断言而不是只断言一个数组：失败信息里要能看出是哪个场景错了。
+  assert.equal(config.scenarios.turnEnd.durationSeconds, 30, '轮次结束应当显示 30 秒')
+  assert.equal(config.scenarios.question.durationSeconds, 0, '等待回答应当常驻（0）')
+  assert.equal(config.scenarios.approval.durationSeconds, 0, '等待授权应当常驻（0）')
+  assert.equal(config.scenarios.error.durationSeconds, 0, '执行出错应当常驻（0）')
+
+  // 0 的语义是「常驻」而不是「立刻消失」——这一条由 notify 侧解释，这里只钉住数字。
+  assert.equal(contract.SCENARIO_IDS.length, 4)
+})
+
+test('默认配置：归一化只补缺失字段，不覆盖用户已保存的值', () => {
+  // 默认值改了之后，老配置文件里的显式值必须原样保留——否则用户的调整会被
+  // 一次升级悄悄改掉，而那是比「默认值不好」严重得多的行为。
+  const saved = { scenarios: { approval: { minIntervalSeconds: 45, durationSeconds: 12 } } }
+  const merged = configModule.normalizeConfig(saved)
+  assert.equal(merged.scenarios.approval.minIntervalSeconds, 45)
+  assert.equal(merged.scenarios.approval.durationSeconds, 12)
+  // 没写到的场景才吃默认值。
+  assert.equal(merged.scenarios.turnEnd.durationSeconds, 30)
+  assert.equal(merged.scenarios.question.durationSeconds, 0)
+})
 
 test('总开关关闭时任何提醒都不发', async () => {
   const h = harness({ patch: (c) => { c.enabled = false } })
@@ -261,7 +298,10 @@ test('限流关闭时不限条数', async () => {
 })
 
 test('每场景最小间隔：窗口内的同场景提醒被合并，窗口外照发', async () => {
-  const h = harness()
+  // **间隔在这里显式给定，不依赖默认值。** 这条测的是分发器的「场景冷却」行为，
+  // 而不是默认配置是多少——默认值改动（四个场景一律 0）不该让它失败，
+  // 而它先前恰恰是靠 approval 的默认 30 秒站着的。
+  const h = harness({ patch: (c) => { c.scenarios.approval.minIntervalSeconds = 30 } })
   assert.equal(h.dispatcher.dispatch({ scenario: 'approval', body: '等授权 A', dedupeKey: 'a1' }).sent, true)
   const second = h.dispatcher.dispatch({ scenario: 'approval', body: '等授权 B', dedupeKey: 'a2' })
   assert.equal(second.reason, 'scenario-interval')
@@ -909,6 +949,62 @@ test('缺 styles 字段的上报不会抹掉已有读数（旧客户端不该把
   const record = (state.clients.styles || []).find((s) => s.kind === 'desktop')
   assert.ok(record !== undefined, '不带 styles 的上报把读数抹掉了')
   assert.equal(record.report.tags, 1)
+})
+
+// ------------------------------------------- 客户端行为：自动保存与标签名本地化
+//
+// 这一组守的是**行为**，不是字符串：真的把组件挂起来、改一个字段、推着计时器走，
+// 看它有没有把改动写到 Host。它覆盖四种真实的坑：
+//   1. 改了字段却永远不保存（自动保存没接上）；
+//   2. 每敲一下键盘就写一次盘（缺少防抖）；
+//   3. **切换/关闭设置页时没落盘**——用户点名要的那一刻，靠组件卸载时的清理函数；
+//   4. 「存完又发现改动」的自咬循环。
+// 第 3、4 条只有在替身真的模拟「ref 跨渲染存活 + 依赖比较 + 卸载清理」时才测得到，
+// 见 scripts/client-react-stub.mjs 的注释。
+
+test('自动保存：装载不写盘、改动防抖后写一次、切换/关闭设置页立刻写一次、存完不自咬', async () => {
+  const { problems, evidence } = await auditClientAutosave({ source: CLIENT_SOURCE, snapshot: sampleState() })
+  assert.deepEqual(problems, [], `自动保存行为审计失败：\n  - ${problems.join('\n  - ')}`)
+  assert.equal(evidence.saveButtonSeen, false, '界面上不该再有「保存」按钮')
+  assert.equal(evidence.postsAfterLoad, 2, `应当恰好写 2 次配置（防抖 1 + 卸载 1），实际 ${evidence.postsAfterLoad}`)
+  assert.deepEqual(evidence.debounceMs, [700], '防抖时长应当是 700ms')
+})
+
+test('设置页标签名按语言给：中文「会话通知」，其余语言「Session Alert」', async () => {
+  const { problems, evidence } = await auditClientAutosave({ source: CLIENT_SOURCE, snapshot: sampleState() })
+  assert.deepEqual(problems.filter((p) => p.includes('标签名')), [])
+  assert.equal(evidence.titleZh, '会话通知')
+  assert.equal(evidence.titleEn, 'Session Alert')
+})
+
+test('行为审计本身有效：破坏自动保存、加回保存按钮、改回标签名，都必须被抓出来', async () => {
+  // 变异测试。一个不会失败的检查等于没有检查——这三种破坏各自对应需求的一半。
+  const mutations = [
+    {
+      label: '去掉「卸载时保存」',
+      source: CLIENT_SOURCE.split('flushSave({ ui: false })').join('void 0'),
+      expect: /卸载/,
+    },
+    {
+      label: '给按钮文案塞上「保存」',
+      source: CLIENT_SOURCE.replace("sendTest: '发一条测试通知',", "sendTest: '保存并发送',"),
+      expect: /保存.*按钮/,
+    },
+    {
+      label: '把标签名改回去',
+      source: CLIENT_SOURCE.replace("title: '会话通知',", "title: 'SessionAlert',")
+        .replace("title: 'Session Alert',", "title: 'SessionAlert',"),
+      expect: /会话通知|Session Alert/,
+    },
+  ]
+  for (const mutation of mutations) {
+    assert.notEqual(mutation.source, CLIENT_SOURCE, `${mutation.label}：变异没能构造出来（找不到原文），这个检查自身已失效`)
+    const { problems } = await auditClientAutosave({ source: mutation.source, snapshot: sampleState() })
+    assert.ok(
+      problems.some((p) => mutation.expect.test(p)),
+      `${mutation.label} 必须被抓出来，实际：${JSON.stringify(problems)}`,
+    )
+  }
 })
 
 if (process.argv.includes('--toast')) {
