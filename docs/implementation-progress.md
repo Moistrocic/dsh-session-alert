@@ -63,8 +63,34 @@ RESULT: raised=true reverted=True unchanged=True
    目前所有通知都带按钮。
 6. **焦点抑制的真机验证**：逻辑已接（Host 算 `suppressed` → 分发器扣卡片、响铃），
    但未在真实焦点变化下验证过。
-7. **降级演练与注册写入路径的驱动器**：已请 `notify-dev` 从 `%TEMP%` 整理进
-   `experiments/`（它们是破坏性的，不宜并入 `npm test`）。
+
+## 验收工具（`experiments/`，均为人工调用，不并入 `npm test`）
+
+本项目的验收标准要求「**刻意演练整条降级链**」，因此这些工具必须留在仓库里、
+可被下一个人复跑。它们都是**破坏性的**（会临时改开始菜单快捷方式），
+所以刻意不挂到 `npm test` 上——挂在旗标下迟早有人在 CI 或手滑时触发。
+
+| 工具 | 作用 |
+| --- | --- |
+| [`notify-degradation-drill.ps1`](../experiments/notify-degradation-drill.ps1) | 降级链演练编排：前置校验 → 改名 → 逐阶段驱动 → `try/finally` 恢复 → **SHA256 自证** |
+| [`notify-drill-phases.mjs`](../experiments/notify-drill-phases.mjs) | 七个阶段的实现（`baseline` / `content` / `fallback` / `balloon` / `restored` / `enoent` / `cleanup`） |
+| [`notify-register-write-path.ps1`](../experiments/notify-register-write-path.ps1) | 注册脚本的**写入**路径：注销 → 重建 → 校验 → 真机投递 → 幂等 |
+| [`notify-action-center-persist.mjs`](../experiments/notify-action-center-persist.mjs) | 操作中心留存探针——「第 8 条不需要写 ShowInActionCenter」的可复现证据 |
+
+最后一份值得单独说明：它把那条被推翻的结论变成了**可重复验证的实验**，而不是只留一句
+「已排除」。下次有人怀疑留存问题时，跑一遍即可，不必重新推一遍。
+
+## 已排除的旧结论（不再作为待办）
+
+- **「操作中心持久化需要写 `ShowInActionCenter=1`」—— 已排除。** 真因是分发器自己的
+  `ExpirationTime`（5 秒的通知 5 秒后自然消失，实测 4 → 2 条），行为完全正确。
+  不写该注册表值，跨进程的常驻通知都留在操作中心。证据见上面的留存探针。
+  **差一点就按错误归因去永久改用户的通知设置** —— 这是本轮最该记住的一条。
+
+## 已完成的收尾项
+
+- ~~`scripts/selftest.mjs`~~ → 已落库（`55d6476`），`npm test` 直接可跑，47/47 通过。
+- ~~降级演练与注册写入路径驱动器整理进 `experiments/`~~ → 已完成（4 份文件）。
 
 ## 一个待合并的重复
 
