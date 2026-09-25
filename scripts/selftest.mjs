@@ -1195,6 +1195,76 @@ test('通知图标资源存在且格式正确（PNG 256×256 / 多尺寸 ICO）'
   assert.ok(ico.readUInt16LE(4) >= 4, `ICO 应当含多个尺寸，实际 ${ico.readUInt16LE(4)} 个`)
 })
 
+// ------------------------------------- 投递的额外字段与「真实结果」（一次真实缺陷）
+//
+// 缺陷经过：宿主为了让投递带上「署名已由应用名承担」与图标路径，**包了一层 `send`**，
+// 而那里引用了没导入的 `sendWindowsToast`。于是每次投递都在运行时抛
+// `sendWindowsToast is not defined`、被记成 failed——**而全部离线测试是绿的**，
+// 界面上还写着「已发送这条预览」。两个原因叠加：
+//   1. 那条路只在**真的投递**时才执行，而没有一条离线测试真的投递（真投就弹通知）；
+//   2. 预览接口只按「已交给投递链」回 ok，没等真实结果。
+// 现在：额外字段走一个纯数据回调（不需要 import 任何投递函数），投递链把 promise 交出来。
+
+test('投递额外字段由 sendExtras 提供并合并进请求（宿主不需要包一层 send）', async () => {
+  const seen = []
+  const dispatcher = new AlertDispatcher({
+    getConfig: () => contract.defaultConfig(),
+    now: () => T0,
+    setTimer: () => ({}),
+    clearTimer: () => {},
+    send: async (request) => { seen.push(request); return { ok: true, code: 0, note: 'toast（自有 AUMID）' } },
+    sendExtras: () => ({ titleInAppName: true, iconPath: 'C:/x/icon.png' }),
+  })
+  const result = dispatcher.dispatch({ scenario: 'turnEnd', body: '正文', dedupeKey: 'k' })
+  assert.equal(result.sent, true)
+  assert.equal(typeof result.done, 'object', 'deliver 应当把投递链的 promise 交出来')
+  await result.done
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].titleInAppName, true, '额外字段应当合并进投递请求')
+  assert.equal(seen[0].iconPath, 'C:/x/icon.png')
+})
+
+test('deliver 交出的 promise 给出**真实**投递结果（不是「已交给投递链」）', async () => {
+  const failed = new AlertDispatcher({
+    getConfig: () => contract.defaultConfig(),
+    now: () => T0,
+    setTimer: () => ({}),
+    clearTimer: () => {},
+    send: async () => ({ ok: false, error: 'sendWindowsToast is not defined' }),
+  })
+  const entry = await failed.dispatch({ scenario: 'turnEnd', body: '正文', dedupeKey: 'k' }).done
+  assert.equal(entry.ok, false, '投递失败必须如实反映在条目上')
+  assert.match(String(entry.error), /is not defined/)
+  assert.equal(failed.snapshot().counters.failed, 1)
+
+  const ok = new AlertDispatcher({
+    getConfig: () => contract.defaultConfig(),
+    now: () => T0,
+    setTimer: () => ({}),
+    clearTimer: () => {},
+    send: async () => ({ ok: true, code: 0, note: 'toast（自有 AUMID）' }),
+  })
+  const good = await ok.dispatch({ scenario: 'turnEnd', body: '正文', dedupeKey: 'k' }).done
+  assert.equal(good.ok, true)
+  assert.equal(good.via, 'toast（自有 AUMID）')
+})
+
+if (process.argv.includes('--deliver')) {
+  test('宿主真的能投递（这一条会真发一条通知；只在你显式要求时跑）', async () => {
+    // **这一条才是能抓住上面那个缺陷的检查**：它把插件真的挂起来、真的走一次投递。
+    // 其它断言都走替身投递（不能真弹通知），而缺陷恰恰只在真实投递路径上。
+    assert.equal(process.platform, 'win32', '只有 Windows 上有意义')
+    const h = freshHarness()
+    const route = h.routes.find((r) => r.kind === 'prefix')
+    const result = await callRoute(route, 'POST', '/api/dsh-session-alert/notify',
+      JSON.stringify({ scenario: 'turnEnd', body: '自检：真机投递冒烟（可忽略）' }))
+    assert.equal(result.status, 200, `预览接口应当回 200，实际 ${result.status}`)
+    assert.equal(result.body.ok, true,
+      `投递失败：${JSON.stringify(result.body)}（详情见 /state 的 dispatch.recent）`)
+    assert.match(String(result.body.via ?? ''), /toast/i)
+  })
+}
+
 if (process.argv.includes('--toast')) {
   test('真机冒烟：真发一条通知，按退出码判定实际走通了哪条路径', async () => {
     assert.equal(process.platform, 'win32', `--toast 只在 Windows 上有意义，当前是 ${process.platform}`)

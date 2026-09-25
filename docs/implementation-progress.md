@@ -6,6 +6,66 @@
 
 ---
 
+# 2026-09-25 第八轮：「发送这条通知」点了没反应——投递根本没发生
+
+用户重启（18:57:38）之后仍然反馈按钮没反应。查运行记录才发现真相与我的假设完全不同：
+
+```
+18:57:51  preview:turnEnd      preview:card+button     ← 用户点了 6 次，请求都到了
+18:57:53  preview:turnEnd      preview:card+button
+18:57:58  preview:question     preview:card+button
+18:58:00  preview:approval     preview:card+button
+18:58:00  preview:approval     preview:card+button
+18:58:03  preview:error        preview:card+button
+```
+
+**按钮是好的、端点也是好的**，但每一条投递都失败：
+
+```
+"error": "sendWindowsToast is not defined"
+counters: { sent: 7, failed: 7 }
+```
+
+## 根因：上一轮我引入的
+
+为了让投递带上「署名已由应用名承担」与图标路径，我在**宿主**里包了一层 `send`：
+
+```js
+send: (request) => sendWindowsToast({ ...request, titleInAppName, iconPath }),
+```
+
+而 `sendWindowsToast` **没有从 `notify.js` 导入**（此前用不到——分发器内部默认就用它）。
+于是每次投递都抛 `ReferenceError`，被投递链如实记成 failed。
+
+**为什么全部离线测试是绿的**：那条路**只在真的投递时才执行**，而没有一条离线测试真的投递
+（真投就会弹通知）。这正是本项目反复栽的那类问题——**没被走过的那条路就是坏的那条路**。
+
+**为什么界面还说「已发送」**：`/notify` 只按 `outcome.sent === true` 回 `ok`，而 `sent`
+的含义是「已交给投递链」，不是「投递成功」。**把失败报成成功，比不报更糟。**
+
+## 三处修法
+
+1. **不再让宿主包 `send`**：分发器新增 `sendExtras`（一个纯数据回调），在 `deliver` 里把
+   额外字段合并进投递请求。宿主不需要 import 任何投递函数，默认投递链原样保留。
+2. **投递链交出真实结果**：`deliver` 现在返回 `{ sent, entry, done }`，`done` 在投递函数
+   回来时兑现（成功 `ok:true` + `via`，失败 `ok:false` + `error`）。`/notify` **等它**
+   （上限 8 秒；超时回 `pending:true` 而**不报失败**——慢不等于失败）。
+3. **界面报真实结果**：成功时连 `via` 一起显示（「已发送这条预览。toast（自有 AUMID）」），
+   失败显示原因，超时显示「已发出，但没等到投递结果」。
+
+## 补上的两道防线
+
+- `node scripts/selftest.mjs --deliver`：**真的把插件挂起来、真的走一次投递**，
+  断言返回 `ok:true`。这是唯一覆盖宿主投递接线的检查——它一跑就会报出
+  `sendWindowsToast is not defined`。
+- `post-restart-check.mjs` 新增：**最近一次投递失败就让验收失败**（读活动列表里的
+  `ok:false` 与 `error`）。本轮它当场报出了那条失败记录。累计失败只作信息项，
+  免得一次瞬时失败让验收长期飘红。
+
+`npm test` 76 → **78 条**（额外字段合并、真实结果）+ 一条 `--deliver` 真机冒烟。
+
+---
+
 # 2026-09-25 第七轮：署名只留在标题上、去掉正文里的工作区前缀、换成 DSH 自己的图标
 
 ## 一、通知署名只出现在标题上

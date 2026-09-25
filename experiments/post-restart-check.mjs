@@ -240,7 +240,31 @@ if (graph === null) {
   }
 }
 
-// ------------------------------------- 5) 通知最上方那一行（AUMID 显示名）
+// ------------------------------------------- 5) 投递结果（不是「已交给投递链」）
+//
+// **这一条是被一次真实缺陷逼出来的**：宿主为了让投递带上额外字段而包了一层 `send`，
+// 里面引用了没导入的 `sendWindowsToast`，于是每次投递都在运行时失败——而界面上写着
+// 「已发送」、全部离线测试是绿的。失败只出现在活动列表里（`ok:false` + `error`）。
+// 因此：**最近一次投递失败就必须让验收失败**（累计失败只作信息，免得一次瞬时失败长期飘红）。
+{
+  const recent = Array.isArray(state?.dispatch?.recent) ? state.dispatch.recent : []
+  const failedCount = state?.dispatch?.counters?.failed ?? 0
+  if (recent.length === 0) {
+    note('本次运行还没有发出过通知', '想确认投递链通不通，可在设置页点「发送这条通知」。')
+  } else {
+    const latest = recent[0]
+    check('最近一次投递没有失败（失败会如实记在活动列表里）',
+      latest.ok !== false,
+      `${latest.time} ${latest.scenario} 投递失败：${JSON.stringify(latest.error)}；` +
+      `正文 ${JSON.stringify(String(latest.body).slice(0, 40))}`)
+    if (failedCount > 0) {
+      note(`本次运行累计投递失败 ${failedCount} 次`,
+        '若其中含修复之前的旧记录，属预期；关键是「最近一次」必须成功。')
+    }
+  }
+}
+
+// ------------------------------------- 6) 通知最上方那一行（AUMID 显示名）
 //
 // 用户把通知最上面那一行当作「通知标题」，而它其实是 Windows 按 **AUMID 的显示名**渲染的
 // 应用名——toast XML 里的标题行在它下面。插件会在署名变化时把这个注册表值同步过去，

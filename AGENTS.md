@@ -69,12 +69,19 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
 5. **PowerShell 变量名大小写不敏感**：`param([string]$Source)` 与 `$source = …` 是**同一个
    变量**。踩过一次：函数体里读 `$script:source` 得到 `$null`，`$Size / $null` 报
    「Attempted to divide by zero」——报错指向除法，真因是命名冲突。函数要用什么就显式传参。
+6. **投递路径只有「真的投递」才走得到，离线测试看不到它。** 踩过一次：宿主为了让投递带上
+   额外字段而包了一层 `send`，里面引用了没导入的 `sendWindowsToast` —— 每次投递都在运行时
+   失败，而**全部离线测试是绿的**、界面上还写着「已发送」。
+   两道防线：`node scripts/selftest.mjs --deliver`（真发一条，覆盖宿主的投递接线）与
+   `post-restart-check.mjs`（**最近一次投递失败就让验收失败**）。
+   因此给投递加字段时**别让宿主去包 `send`**——用 `sendExtras` 交纯数据。
 
 ## 常用命令
 
 ```powershell
-npm test                                     # 76 条离线断言
-npm test -- --toast                          # 额外真发一条通知（真机冒烟）
+npm test                                     # 78 条离线断言（不真发通知）
+node scripts/selftest.mjs --deliver          # 额外真发一条：**唯一覆盖宿主投递接线的检查**
+npm test -- --toast                          # 额外真发一条通知（走 notify.js 的投递链）
 npm run build:icon                           # 从 DSH 自己的图标重新生成通知图标（assets/）
 node experiments/post-restart-check.mjs      # 重启后先跑这条：逐项判定哪些修复已生效
 node experiments/events-wiring-check.mjs     # 事件接线（真实载荷 + 瀑布 next() 断言）
