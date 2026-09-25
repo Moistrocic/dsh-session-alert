@@ -17,40 +17,54 @@
 | 启动器尺寸不变 | `rect 1721x927 -> 1721x927 unchanged=True` |
 | 启动器置顶可逆 | `raised=true reverted=True topmost=False` |
 | 协议方案已注册 | `HKCU\Software\Classes\dsh-session-alert` → 启动器命令，幂等，写入后回读校验 |
+| **端到端：点通知按钮 → 窗口浮到最上层** | 人工确认 + 日志双证据，见下 |
+
+### 端到端验证（本次交付的核心功能，已完成）
+
+用户点击真实通知的按钮后，日志完整记录了整条链路，用户亦确认视觉结果：
+
+```
+args(3)=[dsh-session-alert://open/?session=e2e-16:18:21 | --hold | 8]
+console: GetConsoleWindow()=0  => NO_CONSOLE（未分配控制台）
+sessionId='e2e-16:18:21'                         ← 参数透传正确
+form before: visible=True iconic=False zoomed=True
+ShowWindow(SW_SHOWMAXIMIZED) = True
+rect 1721x927 at(-7,-7) → 1721x927               ← 尺寸未变
+SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE|...) = True
+HOLD begin: 窗口将保持最上层 8 秒
+HOLD end: SetWindowPos(HWND_NOTOPMOST) = True     ← 已还原，不留副作用
+RESULT: raised=true reverted=True unchanged=True
+```
+
+用户确认：**窗口浮到最上层约 8 秒，尺寸没变。**
+
+这次恰好原窗口就是最大化状态，因此同时检验了 ADR 0002 里那条「不得把最大化窗口缩小」
+——`rect 1721x927 -> 1721x927 unchanged=True` 正是它要保证的。
 
 **端别自报已在真实环境跑通**——`liveKinds:["desktop"]` 说明 ADR 0001 那条「客户端自报端别」
 的判断在 desktop 应用里确实成立。
 
 ## 尚未完成
 
-1. **点击按钮的端到端确认**（唯一剩下的验收环节）。链路各环都已单独验证，但「在真实插件
-   形态下点通知按钮 → 窗口到最上层」还没有一次干净的人工确认。
-   - 阻碍：验证期间屏幕上同时有大量通知（队友跑验收会产生），难以分辨。
-   - 建议：等所有验证跑完、屏幕安静时再做。
-2. **四类事件的实际触发**：接线已完成（`session/event` 的 `turn/end`、`user-questions/request`、
+1. **四类事件的实际触发**：接线已完成（`session/event` 的 `turn/end`、`user-questions/request`、
    `approval/request`、`api-session/error`），但尚未在真实会话中观察到四类各自触发一次。
-3. **设置页面的完整配置界面**：当前只呈现端别、通知署名、配置文件路径。模板编辑器、开关、
+   注意这四类的**投递路径**已分别验证过（见上表），缺的是「事件 → 场景」这一段在真实
+   会话里的观测。
+2. **设置页的完整配置界面**：当前只呈现端别、通知署名、配置文件路径。模板编辑器、开关、
    铃声配置尚未接。
-4. **`register-aumid.ps1` 的 ShowInActionCenter 写入——已排除，不需要写。**
-   原先记录的现象是「操作中心只留得住最新一条」，并据此推断需要写
-   `HKCU\...\Notifications\Settings\<aumid>\ShowInActionCenter=1`。
-   **真因是分发器自己的 `ExpirationTime`**：`durationSeconds=5` 的通知 5 秒后自然消失
-   （实测 4 → 2 条），行为完全正确。实测不写该值，两个不同进程发的常驻通知都留在
-   操作中心（`historyCount: 2`）。
-   ——**差一点就按一条错误归因去写注册表**：那不仅无用，还会永久改变用户的通知设置。
-   这条记在这里是为了提醒：现象与归因之间必须有一次独立的验证。
-5. **ADR 0002 的三种卡片形态**：目前只实现了「一个确认按钮」。ADR 0002 规定：
+3. **ADR 0002 的三种卡片形态**：目前只实现了「一个确认按钮」。ADR 0002 规定：
    - 普通卡片：一个确认按钮（**不跳转**，跳转由点卡片本身承担）
    - 审批卡片：**没有**确认按钮，改为批准 / 拒绝
    - 无控件形态（仅 web 受众）
-6. **审批按钮的代答路径**（ADR 0003）：批准/拒绝要真的把决定提交给 DSH。技术路径未落地。
-7. **web 形态的无控件卡片**：端别决定卡片形状这条（ADR 0001）尚未在投递侧体现——
+4. **审批按钮的代答路径**（ADR 0003）：批准/拒绝要真的把决定提交给 DSH。技术路径未落地。
+   已知的可用原语是客户端半边的 `uiWorkspace.openSession`（见 design-progress 5.2），
+   但「Host 把决定回传给客户端」这条通道尚未验证——动态插件通道是浏览器→Host 单向的。
+5. **web 形态的无控件卡片**：端别决定卡片形状这条（ADR 0001）尚未在投递侧体现——
    目前所有通知都带按钮。
-8. **焦点抑制的真机验证**：逻辑已接（Host 算 `suppressed` → 分发器扣卡片、响铃），
+6. **焦点抑制的真机验证**：逻辑已接（Host 算 `suppressed` → 分发器扣卡片、响铃），
    但未在真实焦点变化下验证过。
-9. **`scripts/selftest.mjs`**：`package.json` 的 `npm test` 指向它，但文件尚未创建。
-   队友的 47 条单测目前在 `%TEMP%` 下——**那等于没有测试**：不会随仓库走、下次没人会
-   记得跑、CI 更跑不到。已请其作者落成正式文件。
+7. **降级演练与注册写入路径的驱动器**：已请 `notify-dev` 从 `%TEMP%` 整理进
+   `experiments/`（它们是破坏性的，不宜并入 `npm test`）。
 
 ## 一个待合并的重复
 
