@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+*.log
+.pnpm-store/
+
+# 本次访谈期间从已安装的 v1 插件复制出来的参考副本。
+# 它只是参考材料，不参与 v2 的构建，故不入库；详见 docs/design-progress.md。
+legacy/
+
+# 编辑器与系统垃圾
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
