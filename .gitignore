@@ -3,8 +3,8 @@ node_modules/
 *.log
 .pnpm-store/
 
-# 本次访谈期间从已安装的 v1 插件复制出来的参考副本。
-# 它只是参考材料，不参与 v2 的构建，故不入库；详见 docs/design-progress.md。
+# 本地对照用的残留目录（先前尝试的源码副本与旧配置）。
+# 它是本机工作残留，不是本项目的产物，也不参与构建，故不入库。
 legacy/
 
 # 提交信息用的临时文件（PowerShell 无 heredoc，需落文件再传给 git -F）
