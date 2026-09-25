@@ -111,11 +111,18 @@ export function freshHarness(config) {
   // `npm test --toast` 那条真机冒烟要用真的解释器。
   const savedOverride = process.env.DSH_SESSION_ALERT_POWERSHELL
   process.env.DSH_SESSION_ALERT_POWERSHELL = join(tmpdir(), 'dsh-session-alert-no-such-powershell.exe')
+  // 审批的「先只等通知」宽限期压到 0：默认 20 秒是为了真机体验（让通知先有机会被点），
+  // 在测试里等它就是白等 20 秒。压到 0 之后这个监听器立刻把决定权交给界面，
+  // 于是「调用了 next() 并透传结果」这条断言仍然可测。
+  const savedGrace = process.env.DSH_SESSION_ALERT_NOTIFY_GRACE_MS
+  process.env.DSH_SESSION_ALERT_NOTIFY_GRACE_MS = '0'
   try {
     apply(ctx, Object.assign({ suppressWhenFocused: false, rateLimit: { enabled: false } }, config || {}))
   } finally {
     if (savedOverride === undefined) delete process.env.DSH_SESSION_ALERT_POWERSHELL
     else process.env.DSH_SESSION_ALERT_POWERSHELL = savedOverride
+    if (savedGrace === undefined) delete process.env.DSH_SESSION_ALERT_NOTIFY_GRACE_MS
+    else process.env.DSH_SESSION_ALERT_NOTIFY_GRACE_MS = savedGrace
   }
   return { handlers, routes, ctxs: scoped, scoped }
 }
