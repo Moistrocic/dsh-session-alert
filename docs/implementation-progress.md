@@ -44,6 +44,58 @@ RESULT: raised=true reverted=True unchanged=True
 **端别自报已在真实环境跑通**——`liveKinds:["desktop"]` 说明 ADR 0001 那条「客户端自报端别」
 的判断在 desktop 应用里确实成立。
 
+## 已修复的一个严重缺陷：waterfall 监听器否决了用户的提问与审批
+
+### 缺陷
+
+`user-questions/request` 与 `approval/request` 的处理器**既不接收 `next` 形参也不调用它**，
+且返回 `undefined`。而 cordis 的契约是
+（`@deepseek-ai/cordis/lib/types/events.js`）：
+
+> The last dispatch argument is treated as the innermost `next`. Listeners run
+> outermost-first; **a listener that does not call `next()` vetoes the rest of the
+> chain, including the built-in behavior.**
+
+**也就是说本插件一直在阻断提问与审批流程。** 最坏情况下用户会看不到提问、
+需要授权的工具会直接失败——而通知是附加功能，绝不该有这种后果。
+
+### 为什么当时没发现
+
+我在注释里写了「这是瀑布事件，我们只观察、不干预——不调用 next 也不改结果，
+因此不会影响真正的答题流程」。**那句话是未经验证的假设，而且正好说反了。**
+
+### 为什么接线测试也没发现
+
+`events-wiring-check.mjs` 自己造了一个 `{agent, request}` 形状的载荷去喂处理器。
+那个形状与真实事件不一致——真实签名是 `(this: Scoped<Agent>, request, next)`，
+载荷就是 `request` 本身、`sessionId` 取自 `this`。**测试只证明了「我能喂饱我自己」。**
+
+### 发现路径
+
+它是在补「另三类事件的真实观测」时暴露的：用 `ask_user_question` 真的问了一个问题，
+而信号表**没有**出现 `user-questions/request`。于是去查 `cordis_inspect_query` 的 Event
+目录，看到真实签名与 `mode: waterfall`，才顺藤摸到这条契约。
+
+**这正是「真实观测」与「接线测试」不能相互替代的原因**——也是既定验收标准里同时要求
+两者的理由。
+
+### 修法与测试加强
+
+两个监听器改为普通函数（`this` 是 cordis 传入的作用域 Agent，箭头函数拿不到），
+签名为 `function (request, next)`，观察逻辑包在 try 里，**末尾无条件 `return next()`**，
+且把 `next()` 的结果原样透传。
+
+测试加强是更重要的一半：逐场景用例改为按真实签名 `.call(scoped, payload, next)` 调用；
+新增 4 条断言（两个监听器都必须调用 `next()` 且原样返回其结果）；替身提供作用域对象，
+否则 `this.agent.id` 这条路径测不到。
+
+**一个只观察的事件监听器若忘记 `next`，后果是阻断真实功能，而它在功能测试里可能表现为
+「一切正常」**——因为处理器确实跑了、也确实没报错。因此这条断言必须独立存在。
+
+### 附带确认
+
+`session/event` 与 `api-session/error` 是 `emit` 模式，无需 `next`，写法正确。
+
 ## 尚未完成
 
 1. **另三类事件的真实环境观测**：接线已用逐场景隔离测试验证通过（见「已确证」），
