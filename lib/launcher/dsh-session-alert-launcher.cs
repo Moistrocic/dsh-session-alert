@@ -1,4 +1,4 @@
-﻿// dsh-session-alert 无控制台启动器
+// dsh-session-alert 无控制台启动器
 //
 // ## 它做什么
 //
@@ -66,6 +66,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Windows.Forms;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -85,6 +87,10 @@ internal static partial class LauncherContract
 
     /// 日志文件名（落在 %TEMP% 下）。
     internal const string LogFileName = "dsh-session-alert-launcher.log";
+
+        /// 提交审批决定的宿主端点。端口与插件其它路由一致（本机回环，无需凭据——
+        /// 凭据是 URL 里那个一次性令牌，见 lib/decisions.js）。
+        internal const string HostDecideUrl = "http://127.0.0.1:19387/api/dsh-session-alert/decide";
 }
 
 internal static class Launcher
@@ -113,6 +119,12 @@ internal static class Launcher
     {
         internal string SessionId = "";
         internal int HoldSeconds = DefaultHoldSeconds;
+
+        /// 审批决定（`dsh-session-alert://decide/?token=…&decision=allow|deny`）。
+        /// Token 非空即表示本次激活是**提交一个决定**，而不是把窗口带到最上层：
+        /// 这种情况下不发任何窗口指令，只把决定 POST 回宿主。
+        internal string DecisionToken = "";
+        internal string Decision = "";
         internal string ProcessName = DefaultProcessName;
         internal bool SelfCheckOnly;
     }
@@ -141,6 +153,9 @@ internal static class Launcher
             return EXIT_EXCEPTION;
         }
 
+        // 解析结果先落日志：`--selfcheck` 也会走到这里，因此**URL 解析可以单独验证**，
+        // 不必真的发一次 HTTP（那会在失败时弹窗）。
+        Log("decide: tokenLen=" + options.DecisionToken.Length + " decision='" + options.Decision + "'");
         // 结论先行：无控制台的判据是 GetConsoleWindow() == NULL（见 ADR 0004）。
         LogConsoleState();
 
@@ -172,6 +187,15 @@ internal static class Launcher
         {
             Log("SELFCHECK exit: 0（诊断模式，不触碰窗口）");
             return EXIT_RAISED;
+        }
+
+        // ---------- 提交审批决定 ----------
+        // 走这条路的激活**不碰窗口**：用户点的是「批准 / 拒绝」，他期望的是把决定送出去，
+        // 而不是窗口跳出来。决定 POST 回宿主，由宿主里那个正在等待的应答者兑现
+        // （见 lib/decisions.js：令牌一次性、有期限，拿不到决定就交回界面）。
+        if (options.DecisionToken.Length > 0)
+        {
+            return SubmitDecision(options);
         }
 
         IntPtr hwnd = IntPtr.Zero;
@@ -408,7 +432,20 @@ internal static class Launcher
                 continue;
             }
 
-            // URL 形态：从查询串里取 session=<id>。
+            // URL 形态。两种：
+            //   .../open/?session=<id>                  → 把窗口带到最上层
+            //   .../decide/?token=<t>&decision=<allow|deny> → 提交一个审批决定
+            //
+            // `decide` 是**先判定的**：它决定本次激活要不要碰窗口。
+            if (o.DecisionToken.Length == 0)
+            {
+                string token = QueryValue(a, "token=");
+                if (token.Length > 0)
+                {
+                    o.DecisionToken = token;
+                    o.Decision = QueryValue(a, "decision=");
+                }
+            }
             if (o.SessionId.Length == 0)
             {
                 string fromUrl = SessionFromUrl(a);
@@ -416,6 +453,105 @@ internal static class Launcher
             }
         }
         return o;
+    }
+
+
+    /// 取不到返回空串。查询串由系统规范化过，但仍按可能带 `&`/`#`/空格/`?` 处理。
+    /// 把卡片按钮带回的决定 POST 回宿主。
+    ///
+    /// 为什么由启动器发这个请求，而不是让按钮直接指向 HTTP：toast 按钮只能走协议激活
+    /// （Windows 不认「按钮 → 任意 URL」这条直连路），因此本程序就是那条通道的中继。
+    /// 它只做一件事：把 token 与 decision 原样转给本机宿主。
+    ///
+    /// **失败必须说出来**：用户点了「批准」却什么都没发生，是最糟的结果——他会以为
+    /// 审批已经批了。因此只有失败路径会弹提示框（本程序唯一会出现的 UI），成功则静默退出。
+    private static int SubmitDecision(Options options)
+    {
+        string url = LauncherContract.HostDecideUrl;
+        string body = "{\"token\":\"" + JsonEscape(options.DecisionToken)
+            + "\",\"decision\":\"" + JsonEscape(options.Decision) + "\"}";
+        Log("decide: decision='" + options.Decision + "' tokenLen=" + options.DecisionToken.Length);
+        try
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "POST";
+            request.ContentType = "application/json";
+            request.Timeout = 5000;
+            request.ReadWriteTimeout = 5000;
+            byte[] payload = Encoding.UTF8.GetBytes(body);
+            request.ContentLength = payload.Length;
+            using (Stream stream = request.GetRequestStream())
+            {
+                stream.Write(payload, 0, payload.Length);
+            }
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                int status = (int)response.StatusCode;
+                Log("decide: HTTP " + status);
+                if (status >= 200 && status < 300) return EXIT_RAISED;
+            }
+            ShowNotice("这个决定已经失效", "宿主拒绝了它。\n请在 DSH 界面里作答。");
+            return EXIT_NO_TARGET;
+        }
+        catch (WebException ex)
+        {
+            // 4xx 不是故障，是设计：令牌已用过、已过期，或那个请求已经结束了。
+            HttpWebResponse failed = ex.Response as HttpWebResponse;
+            if (failed != null)
+            {
+                int status = (int)failed.StatusCode;
+                Log("decide: HTTP " + status + "（" + ex.Message + "）");
+                ShowNotice("这个决定已经失效", "它可能已经被用过，或者这张卡片对应的请求已经结束了。\n请在 DSH 界面里作答。");
+                return EXIT_NO_TARGET;
+            }
+            Log("FAIL: 提交决定时连不上宿主: " + Describe(ex));
+            ShowNotice("没能把决定交给 DSH", "连不上 " + url + "。\n请在 DSH 界面里作答。");
+            return EXIT_NO_TARGET;
+        }
+        catch (Exception ex)
+        {
+            Log("FAIL: 提交决定异常: " + Describe(ex));
+            ShowNotice("没能把决定交给 DSH", Describe(ex) + "\n请在 DSH 界面里作答。");
+            return EXIT_NO_TARGET;
+        }
+    }
+
+    /// 唯一的用户可见失败通道。成功路径绝不弹窗——点了「批准」再弹一个框只会让人困惑。
+    private static void ShowNotice(string title, string text)
+    {
+        try
+        {
+            MessageBox.Show(text, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (Exception ex)
+        {
+            Log("WARN: 无法显示提示框: " + Describe(ex));
+        }
+    }
+
+    /// JSON 字符串转义。输入只有十六进制令牌与固定词，因此只需处理引号与反斜杠。
+    private static string JsonEscape(string value)
+    {
+        if (value == null) return "";
+        return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+    private static string QueryValue(string arg, string key)
+    {
+        if (arg == null) return "";
+        int q = arg.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+        if (q < 0) return "";
+        string rest = arg.Substring(q + key.Length);
+        int end = rest.IndexOfAny(new char[] { '&', '#', ' ', '?' });
+        string value = end < 0 ? rest : rest.Substring(0, end);
+        if (value.Length == 0) return "";
+        try
+        {
+            return Uri.UnescapeDataString(value);
+        }
+        catch (Exception)
+        {
+            return value;
+        }
     }
 
     /// 从协议激活传入的 URL（或任意含查询串的参数）里取出会话 id。

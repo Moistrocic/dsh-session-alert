@@ -206,6 +206,13 @@ console.log('\n=== 瀑布事件必须交出决定权（否则会否决真实功�
     let returned
     try {
       returned = handler.call(ctxs, wc.payload, () => { nextCalls += 1; return 'CHAIN-RESULT' })
+      // **瀑布监听器可以返回 promise**——事件契约本身就是 `Promise<ApprovalOutcome>`：
+      // 审批场景要等用户在通知上按下「批准 / 拒绝」。早先这里直接比字符串，
+      // 于是一个正确实现（返回 `Promise.race([…])`）会被判成「返回值是 {}」。
+      // 先把 promise 兑现出来，再比对结果。
+      if (returned !== null && typeof returned === 'object' && typeof returned.then === 'function') {
+        returned = await returned
+      }
     } catch (error) {
       check(`${wc.event} 调用不抛错`, false, error.message)
       continue

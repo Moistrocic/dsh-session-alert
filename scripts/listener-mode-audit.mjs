@@ -101,10 +101,23 @@ export function auditListenerModes(source) {
       continue
     }
     const hasReturnNext = /return\s+next\s*\(/.test(reg.handler)
+    /**
+     * 是否**调用**了 `next()`。
+     *
+     * 判据从「必须 `return next()`」放宽成「必须调用 `next()`」：瀑布监听器可以
+     * **先接管、再交出决定权**，例如审批场景——插件把通知按钮的决定与界面那侧的决定
+     * 赛跑（`Promise.race([armed.promise, fromUi])`），此时 `next()` 被调用、其结果被
+     * 采用，但不是以 `return next()` 的字面形态出现。
+     *
+     * **放宽不等于不查**：一个从不调用 `next()` 的监听器仍然会被抓出来（那才会否决
+     * 后续链）；而且「真的调用了 next()」还有一条行为断言兜着——静态审计看不见
+     * `next()` 是不是写在死分支里，行为测试看得见。
+     */
+    const callsNext = /\bnext\s*\(/.test(reg.handler)
     const takesNext = /\(\s*[^)]*\bnext\b[^)]*\)/.test(reg.handler)
     if (mode === 'waterfall') {
-      if (!hasReturnNext) {
-        problems.push(`${reg.event}（waterfall，第 ${reg.line} 行）缺少 return next()；` +
+      if (!callsNext) {
+        problems.push(`${reg.event}（waterfall，第 ${reg.line} 行）没有调用 next()；` +
           '这会否决后续链，包括内建行为')
       }
     } else {

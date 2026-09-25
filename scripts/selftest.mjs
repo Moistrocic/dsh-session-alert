@@ -47,6 +47,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
+// 令牌表直接单测：它的不变式（一次性、有期限、不泄露）是安全边界本身。
+const { DecisionStore } = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'decisions.js')).href)
+
 const notify = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'notify.js')).href)
 const contract = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'contract.js')).href)
 const configModule = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'config.js')).href)
@@ -730,7 +733,7 @@ test('每个事件监听器都与它的 dispatch mode 相符（瀑布必须 retu
   assert.deepEqual(problems, [], `监听器 mode 审计失败：\n  - ${problems.join('\n  - ')}`)
 })
 
-test('审计本身有效：缺 return next() 的瀑布监听器必须被抓出来', () => {
+test('审计本身有效：从不调用 next() 的瀑布监听器必须被抓出来', () => {
   // 变异测试。一个不会失败的检查等于没有检查——它必须先能抓到。
   const mutated = `
     ctx.on('user-questions/request', function (request, next) {
@@ -739,7 +742,7 @@ test('审计本身有效：缺 return next() 的瀑布监听器必须被抓出�
   `
   const { problems } = auditListenerModes(mutated)
   assert.equal(problems.length, 1, '应当恰好报出一条问题')
-  assert.match(problems[0], /缺少 return next\(\)/)
+  assert.match(problems[0], /没有调用 next\(\)/)
 
   // 补上 return next() 之后应当通过
   const fixed = `
@@ -1239,6 +1242,153 @@ test('deliver 交出的 promise 给出**真实**投递结果（不是「已交�
   const good = await ok.dispatch({ scenario: 'turnEnd', body: '正文', dedupeKey: 'k' }).done
   assert.equal(good.ok, true)
   assert.equal(good.via, 'toast（自有 AUMID）')
+})
+
+// ------------------------------------------- 审批决定：令牌表（通知按钮真正能决定）
+//
+// 通道形状：toast 按钮 → 协议激活 → 启动器 → `POST /decide`。这条通道**没有凭据**
+// （本插件路由本来就不需要凭据），所以决定全靠令牌：一次性、有期限、只出现在那张卡片里。
+// 下面每一条都对应一条不变式——任何一条坏了，都意味着本机任意进程能放行工具调用。
+
+test('令牌表：一次决定只能用一次，且映射到 DSH 的结果词汇', async () => {
+  const store = new DecisionStore({ now: () => 1000, randomToken: () => 'tok-1' })
+  const armed = store.open({ sessionId: 's1', toolName: 'pwsh' })
+  assert.equal(armed.token, 'tok-1')
+  assert.equal(store.snapshot().pending, 1)
+
+  assert.deepEqual(store.decide('tok-1', 'allow'), { ok: true, outcome: 'allowed-once' })
+  assert.equal(await armed.promise, 'allowed-once')
+
+  // **第二次必须失败**：否则一次点击可以被重放成多次放行。
+  assert.equal(store.decide('tok-1', 'allow').ok, false)
+  assert.equal(store.snapshot().pending, 0)
+})
+
+test('令牌表：拒绝映射到 rejected；未知令牌、空令牌、怪决定词一律不受理', async () => {
+  const store = new DecisionStore({ now: () => 1000, randomToken: () => 'tok-2' })
+  const armed = store.open({ sessionId: 's1', toolName: 'pwsh' })
+  assert.equal(store.decide('tok-2', 'deny').ok, true)
+  assert.equal(await armed.promise, 'rejected')
+
+  assert.equal(store.decide('tok-2', 'deny').ok, false, '用过的令牌不能再提交')
+  assert.equal(store.decide('nope', 'allow').ok, false, '未知令牌不受理')
+  assert.equal(store.decide('', 'allow').ok, false, '空令牌不受理')
+  assert.equal(store.decide('tok-2', 'yes').ok, false, '不属于结果词汇的决定词不受理')
+  assert.equal(store.decide('tok-2', undefined).ok, false)
+})
+
+test('令牌表：过期即失效，清掉过期项，且**绝不**因此产生决定', async () => {
+  let now = 1000
+  // 令牌必须逐个不同：第一版这里写死 `() => 'tok-3'`，于是 `late` 拿到了**同一个令牌**，
+  // 第二次提交落到了另一个请求上——那正是这套令牌要防的事故。测试替身自己制造了事故。
+  let counter = 0
+  const store = new DecisionStore({ ttlMs: 500, now: () => now, randomToken: () => `tok-${++counter}` })
+  const armed = store.open({ sessionId: 's1', toolName: 'pwsh' })
+
+  now = 1400
+  assert.equal(store.decide('tok-1', 'allow').ok, true, '期限内应当受理')
+  assert.equal(await armed.promise, 'allowed-once')
+
+  const late = store.open({ sessionId: 's2', toolName: 'bash' })
+  assert.equal(late.token, 'tok-2', '第二个请求必须拿到不同的令牌')
+  // `late` 是在 now=1400 时开的，所以「过期」要从那一刻起算。第一版写 `1000 + 501`，
+  // 相对 1400 只过了 101ms —— 于是这条断言在测一件根本没发生的事。
+  now = 1400 + 501
+  const expired = store.decide('tok-2', 'allow')
+  assert.equal(expired.ok, false)
+  assert.match(expired.reason, /过期/)
+  // 过期提交会把令牌清掉（它从此不可用）——但**请求本身仍在等界面作答**，
+  // 因此下面那条「promise 永不兑现」才是这条测试真正要守住的东西。
+  assert.equal(store.snapshot().pending, 0, '过期提交应当把令牌清掉')
+  assert.equal(store.sweep(), 0, '已经清掉了，再扫没有可清的')
+
+  // 关键：过期**不会**自动产生任何决定——promise 永不兑现，决定权回到界面那侧。
+  const winner = await Promise.race([
+    late.promise.then(() => 'settled'),
+    new Promise((resolve) => setTimeout(() => resolve('still-pending'), 10)),
+  ])
+  assert.equal(winner, 'still-pending', '过期绝不能被当成放行')
+})
+
+test('令牌表：作废后的令牌不能再提交（请求已结束的卡片点不动）', () => {
+  const store = new DecisionStore({ now: () => 1000, randomToken: () => 'tok-4' })
+  store.open({ sessionId: 's1', toolName: 'pwsh' }).dispose()
+  assert.equal(store.decide('tok-4', 'allow').ok, false)
+  assert.equal(store.snapshot().pending, 0)
+})
+
+test('令牌表：诊断快照里**不含令牌**（/state 是本机无凭据可读的）', () => {
+  const store = new DecisionStore({ now: () => 1000, randomToken: () => 'SUPER-SECRET-TOKEN' })
+  store.open({ sessionId: 's1', toolName: 'pwsh' })
+  const snapshot = JSON.stringify(store.snapshot())
+  assert.ok(!snapshot.includes('SUPER-SECRET-TOKEN'), `快照泄露了令牌：${snapshot}`)
+  assert.match(snapshot, /pwsh/, '但要能看出有哪个工具在等决定')
+})
+
+test('按钮 URL：批准与拒绝各自指向一次性令牌，都走自有协议', () => {
+  const allow = contract.decisionUrl('tok-9', 'allow')
+  assert.match(allow, /^dsh-session-alert:\/\/decide\/\?/)
+  assert.match(allow, /token=tok-9/)
+  assert.match(allow, /decision=allow/)
+  assert.match(contract.decisionUrl('tok-9', 'deny'), /decision=deny/)
+  // 令牌里的特殊字符必须编码，否则会被查询串拆开。
+  assert.match(contract.decisionUrl('a&b c', 'allow'), /token=a%26b%20c/)
+  // 跳转按钮与决定按钮是两个不同的路径，别混成一个。
+  assert.match(contract.protocolUrl('s1'), /\/open\/\?session=s1/)
+})
+
+test('审批卡片三个按钮（批准 / 拒绝 / 跳转到Harness），普通卡片只有一个跳转', () => {
+  // Host 侧没有能观察 actions 数组的替身接缝（投递链是真实的），因此这里核对源码里的
+  // 声明顺序与文案——与客户端文案守卫同一个套路：**文案也是行为的一部分**，
+  // 写成「批准」却只把窗口带上前来，比没有这个按钮更糟。
+  const source = readFileSync(join(PACKAGE_ROOT, 'lib', 'index.js'), 'utf8')
+  // 切片从 `const jump =` 开始：跳转按钮是**先声明的常量**，从 `const actions` 起切会把它漏在外面。
+  const block = source.slice(source.indexOf('const jump ='),
+    source.indexOf('const result = dispatcher.dispatch'))
+  // 三个按钮的**数组顺序**就是卡片上的左右顺序：批准 → 拒绝 → 跳转。
+  const approveAt = block.indexOf("content: '批准'")
+  const denyAt = block.indexOf("content: '拒绝'")
+  const jumpAt = block.indexOf('jump,')
+  assert.ok(approveAt >= 0 && denyAt > approveAt && jumpAt > denyAt,
+    `三个按钮的顺序应当是 批准 → 拒绝 → 跳转到Harness，实际位置 ${approveAt}/${denyAt}/${jumpAt}`)
+  assert.match(block, /const jump = \{ content: '跳转到Harness'/)
+  assert.match(block, /decisionUrl\(decide\.token, 'allow'\)/)
+  assert.match(block, /decisionUrl\(decide\.token, 'deny'\)/)
+  assert.match(block, /const canDecide = isApproval && desktopOnline/)
+  assert.ok(!block.includes('知道了') && !block.includes('去处理'), '旧的按钮文案不该还在')
+})
+
+test('决定路由：无效令牌 / 非法请求体一律 400，且不产生任何决定', async () => {
+  const h = freshHarness()
+  const route = h.routes.find((r) => r.kind === 'prefix')
+
+  const unknown = await callRoute(route, 'POST', '/api/dsh-session-alert/decide',
+    JSON.stringify({ token: 'nope', decision: 'allow' }))
+  assert.equal(unknown.status, 400, `无效令牌应当回 400，实际 ${unknown.status}`)
+  assert.equal(unknown.body.ok, false)
+  assert.match(String(unknown.body.reason ?? unknown.body.error), /失效|过期/)
+
+  assert.equal((await callRoute(route, 'POST', '/api/dsh-session-alert/decide', 'not json')).status, 400)
+  assert.equal((await callRoute(route, 'POST', '/api/dsh-session-alert/decide',
+    JSON.stringify({ token: 'anything', decision: 'yes' }))).status, 400)
+})
+
+test('/state 只报「有几个待决」，不含任何令牌字样', async () => {
+  const h = freshHarness()
+  const state = await readState(h.routes)
+  assert.notEqual(state, null)
+  assert.equal(typeof state.decisions, 'object')
+  assert.equal(state.decisions.pending, 0)
+  assert.ok(!/token/i.test(JSON.stringify(state.decisions)),
+    `decisions 里出现了 token 字样：${JSON.stringify(state.decisions)}`)
+})
+
+test('卡片本身不承载动作：toast 用 activationType="system"', () => {
+  // 用户要求：点卡片不触发任何逻辑，只确认收到。不写这个属性时，点卡片会按 AUMID 激活
+  // 应用身份 —— 也就是拉起开始菜单快捷方式指向的那个「惰性命令」。
+  const script = notify.buildToastScript({ title: 'T', body: 'B' })
+  assert.match(script, /\$toast\.SetAttribute\('activationType', 'system'\)/)
+  assert.ok(!script.includes("SetAttribute('launch'"), '不该有 launch，卡片不跳转也不激活')
 })
 
 if (process.argv.includes('--deliver')) {

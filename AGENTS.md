@@ -59,18 +59,24 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
    `npm run build:icon` 从 DSH 自己的 `resources\icon.png` 生成多尺寸 ICO）。
    **不要在 toast XML 里写 `<image placement="appLogoOverride">`**：那会在**正文里多出一个
    图标**（用户实测反馈：「标题的图标正常，内容为什么还有一个图标？」）。XML 里一个 image 都不写。
-3. **动作的结果必须报在动作旁边。** 「发送这条通知」的按钮在页面中部，而提示一开始报在
+3. **审批卡片上的「批准 / 拒绝」是真的会提交决定**（ADR 0007 取代了 ADR 0006 的结论）。
+   做法：插件作为 `approval/request` 的 waterfall 应答者，开一次性令牌 → 按钮带令牌 →
+   启动器 POST 回 `/decide` → `Promise.race` 与界面那侧赛跑。六条不变式（一次性、过期失效、
+   沉默不是同意、卡片没发出去就作废、不进 `/state`、令牌是唯一的关）在 `npm test` 里各有断言。
+   **改这块之前先读 [docs/adr/0007](docs/adr/0007-approval-controls-submit-decisions.md)**：
+   它记着为什么不能走「请求 id + 稍后回调」那条路。
+4. **动作的结果必须报在动作旁边。** 「发送这条通知」的按钮在页面中部，而提示一开始报在
    页面底部的「操作」行——用户点了按钮、结果出现在屏幕外，反馈就是「按了没反应」。
    `notice` 因此带 `where`，行为审计会用**祖先链**断言提示确实在按钮那一行里。
    同理，失败提示要说清**下一步该做什么**（404 = Host 半边没重启，就直说）。
-4. **Host 半边改了必须重启，重挂载插件不能替代。** 实测：用插件管理器把
+5. **Host 半边改了必须重启，重挂载插件不能替代。** 实测：用插件管理器把
    `include:session-alert` 禁用再启用，插件确实重新挂载（`/state` 401 → 200），
    但**跑的还是旧代码**——cordis Loader 复用 Node 的 ESM 缓存（按 URL 缓存）。
    验证新 Host 代码是否在跑，看 `/state` 里的新字段，不要靠「我刚重启过」的记忆。
-5. **PowerShell 变量名大小写不敏感**：`param([string]$Source)` 与 `$source = …` 是**同一个
+6. **PowerShell 变量名大小写不敏感**：`param([string]$Source)` 与 `$source = …` 是**同一个
    变量**。踩过一次：函数体里读 `$script:source` 得到 `$null`，`$Size / $null` 报
    「Attempted to divide by zero」——报错指向除法，真因是命名冲突。函数要用什么就显式传参。
-6. **投递路径只有「真的投递」才走得到，离线测试看不到它。** 踩过一次：宿主为了让投递带上
+7. **投递路径只有「真的投递」才走得到，离线测试看不到它。** 踩过一次：宿主为了让投递带上
    额外字段而包了一层 `send`，里面引用了没导入的 `sendWindowsToast` —— 每次投递都在运行时
    失败，而**全部离线测试是绿的**、界面上还写着「已发送」。
    两道防线：`node scripts/selftest.mjs --deliver`（真发一条，覆盖宿主的投递接线）与
@@ -80,7 +86,7 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
 ## 常用命令
 
 ```powershell
-npm test                                     # 78 条离线断言（不真发通知）
+npm test                                     # 88 条离线断言（不真发通知，60s 用例超时）
 node scripts/selftest.mjs --deliver          # 额外真发一条：**唯一覆盖宿主投递接线的检查**
 npm test -- --toast                          # 额外真发一条通知（走 notify.js 的投递链）
 npm run build:icon                           # 从 DSH 自己的图标重新生成通知图标（assets/）
@@ -99,8 +105,9 @@ node experiments/asar-read.mjs list|read|grep   # 读 DSH 的 app.asar
 ## 文档
 
 - [`CONTEXT.md`](./CONTEXT.md) —— 术语表
-- [`docs/adr/`](./docs/adr/0001-client-kind-and-announcement-shape.md) —— 六条设计决定
-  （**0003 已被 0006 取代**）
+- [`docs/adr/`](./docs/adr/0001-client-kind-and-announcement-shape.md) —— 七条设计决定
+  （**0003 → 0006 → 0007**：审批控件最终可以提交决定，见
+  [0007](./docs/adr/0007-approval-controls-submit-decisions.md)）
 - [`docs/design-progress.md`](./docs/design-progress.md) —— 设计结论 +
   **16 条已验证的实测知识**（PowerShell / Windows UI 的各种坑）
 - [`docs/implementation-progress.md`](./docs/implementation-progress.md) —— 实现进度

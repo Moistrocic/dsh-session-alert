@@ -72,7 +72,35 @@ export function sampleState() {
  * @param {object} options.snapshot - 与真实 `/state` 同形状的快照（用于装载）。
  * @returns {Promise<{problems: string[], evidence: object}>} `problems` 为空即通过。
  */
+/**
+ * 本模块**会临时改写全局**（`setTimeout`/`clearTimeout`/`fetch`）来接管防抖与请求。
+ *
+ * 这里在模块加载时记下真正的原件：以前只在 `override` 里「保存当前值」，却**从来没有还原**
+ * ——于是本模块被 in-process 导入时（`scripts/selftest.mjs` 就是这么用的），
+ * 后续所有用例拿到的都是那个**永不触发的假计时器**：任何 `setTimeout` 断言都会静默挂死。
+ * 实测就是被这条坑到：一个 10ms 的计时器让整份测试卡到超时。
+ */
+const PRISTINE_GLOBALS = new Map(
+  ['setTimeout', 'clearTimeout', 'fetch'].map((name) => [name, globalThis[name]]),
+)
+
+/** 把被改写的全局还原成模块加载时的原件。**必须在 finally 里调用。** */
+function restoreGlobals() {
+  for (const [name, value] of PRISTINE_GLOBALS) {
+    if (value === undefined) delete globalThis[name]
+    else globalThis[name] = value
+  }
+}
+
 export async function auditClientAutosave(options) {
+  try {
+    return await auditClientAutosaveInner(options)
+  } finally {
+    restoreGlobals()
+  }
+}
+
+async function auditClientAutosaveInner(options) {
   const source = options.source
   const snapshot = options.snapshot
   const problems = []
