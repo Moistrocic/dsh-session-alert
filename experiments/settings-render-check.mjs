@@ -1,4 +1,22 @@
-// 设置页渲染自检：走**有数据的主分支**（此前只测过「加载中」占位分支）。
+// 设置页渲染自检：走**有数据的主分支**，用递归遍历确认关键内容都出现了。
+//
+// ## 这个文件能证明什么、不能证明什么（重要）
+//
+// **不能证明「设置页渲染正常」。** 它用一个自制的 React/DOM 替身运行组件函数，
+// 而 DSH 官方 verification 参考明确说过：
+//
+//   "Before or after installation, do not … emulate React/DOM, or implement a custom
+//    renderer to compensate for missing browser control. A screenshot of a mock page is
+//    not verification of the running plugin."
+//
+// **能证明的是**：组件在「有数据」这条分支上不抛异常，且它产出的元素树里包含预期的
+// 文本与类名。这抓的是**代码层面的错误**——本文件确实抓到过一次真问题：
+// 替身把子组件的 hook 状态与父组件串了线，导致 TemplateEditor 读到 snapshot 对象而
+// 返回 null。那次症状看着像「模板编辑器有 bug」，实际是替身的问题。
+//
+// 因此它的定位是**开发期的内部一致性检查**，不是验收证据。真正的渲染确认只能由连在
+// DSH 上的页面做人眼（或浏览器控制）验证；这一点在 docs/implementation-progress.md
+// 的未完成项里如实标注，不拿它冒充。
 //
 // ## 为什么需要它
 //
@@ -6,11 +24,14 @@
 // ——主分支（开关、模板编辑器、诊断区）一行都没执行过。而主分支才是用户真正看到的，
 // 也是字段访问最容易出错的地方（snapshot.clients.liveKinds、dispatch.windowUsed 等）。
 //
-// 做法：喂一份**与真实 /state 同形状**的假快照，递归走一遍元素树，确认：
+// ## 做法
+//
+// 喂一份**与真实 /state 同形状**的假快照，递归走一遍元素树，确认：
 //   1. 不抛异常；
 //   2. 关键区块都出现了（通用 / 抑制 / 模板 / 铃声 / 限流 / 诊断）；
 //   3. 模板编辑器的切换器列出了四个场景；
-//   4. 信号表与最近通知被渲染出来。
+//   4. 信号表与最近通知被渲染出来；
+//   5. 文本字典确实注册进了 locale 服务。
 // client.js 是 `__ModuleLoader__.load(...)` 形式的包内半边，**没有 ESM 导出**，
 // 因此不能 `import { apply }`。它的加载方式要求先铺好 window.__ModuleLoader__，
 // 再动态 import 让它自行注册——静态 import 会在铺好全局量之前就求值，必然失败。
