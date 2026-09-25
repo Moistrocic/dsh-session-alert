@@ -10,12 +10,22 @@
 > 用户点「跳转到Harness」→ **窗口到眼前时批准提示已经在** ✓。
 > 细节见 [`docs/implementation-progress.md`](./docs/implementation-progress.md) 第十轮第 0 / 0.1 / 0.2 节。
 >
-> ⚠️ **但第 ②③ 两项的改动：测试套件一次都没跑过**（当时 `workspace-write` 下沙箱设不了
-> 工作区 ACL，`pwsh` 直接失败；唯一一次升级请求被拒）。改动在 `lib/index.js`
-> （审批交接：通知 / **焦点** / 超时三选一）与 `scripts/event-harness.mjs`（宽限期压 0），
-> **未提交**。接手时请先补跑 `npm test` 与 `node experiments/events-wiring-check.mjs` ——
-> 后者现在要 await 监听器之后才数 `next()` 调用次数。**仍未在真机验过的分支**：
-> 通知上点「拒绝」（fail closed 的端到端）、以及「20 秒不点、由宽限期兜底」。
+> ✅ **第 ②③ 两项后来补齐了**：改动已提交（`163a81f`），提交前跑过
+> `npm test`（**89/89**）、`events-wiring-check`（全过）、`listener-mode-audit`（全过）——
+> 也就是说「先等通知再交界面」「焦点交接」「前台宽限 1 秒」这几处都有绿灯兜着。
+> **仍未在真机验过的分支**：通知上点「拒绝」（fail closed 的端到端）、
+> 以及「20 秒不点、由宽限期兜底」。
+>
+> **web 端（第十一轮）**：插件已在 **web profile** 装好并验证 ——
+> `plugin_manager install_bundle target=C:\Code\Projects\dsh-session-alert`（`application: applied`；
+> 依赖 `link:` 指向本工作区，pnpm lockfile 同步）；`/state` 从 **401 → 200**；
+> `POST /test` 真发出一条 toast；正常路径判决串 **`preview:card-only`**、活动条目 `actions=0`
+> —— 即 **web 受众只收通知、不带任何交互控件**（用户要求的正是这个边界）。
+> 细节见 [`docs/implementation-progress.md`](./docs/implementation-progress.md) 第十一轮。
+>
+> ⚠️ **端口按 profile 不同**：桌面端 `19387`，web 端 **`3080`**。
+> `experiments/post-restart-check.mjs` 里写死的是 19387（桌面）——在 web 端跑会连不上，
+> 验 web 端请直接 curl `3080`。
 
 ---
 

@@ -83,6 +83,32 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
    `post-restart-check.mjs`（**最近一次投递失败就让验收失败**）。
    因此给投递加字段时**别让宿主去包 `send`**——用 `sendExtras` 交纯数据。
 
+## 两个 profile（desktop / web）与安装方式
+
+**桌面端与 web 端是两个 profile**（`~/.dsh/profiles/desktop` 与 `~/.dsh/profiles/web`），
+各有自己的依赖与 Loader 树；**用户级的东西是共享的**：`~/.dsh/dsh-session-alert/config.json`、
+AUMID 注册、协议注册、`bin/` 启动器。两个 profile 都通过
+`"dsh-session-alert": "link:C:/Code/Projects/dsh-session-alert"` 指向本工作区，因此改代码后
+两端跑同一份；但**生效方式不同**：新增 Loader 行走 profile 的 live patch 重载（立即生效），
+替换已在进程里的模块则要重启那个 Host。
+
+**安装/启用必须走官方通道，不要手写 profile 文件**：
+
+```
+plugin_manager  action: install_bundle  target: <包目录绝对路径>
+```
+
+官方技能文档明说：不要写 profile 的 `package.json` / `cordis.patch.yml`、不要在 profile
+目录里跑 pnpm —— `install_bundle` 会做这些（含 pnpm 与 lockfile），它返回的
+`application` / `warnings` **才是「是否已生效」的判据**。
+（实测教训：第一版我手改 `package.json` 为 `link:` 并手建 junction，虽然碰巧等价，
+但既没更新 lockfile，也违反了这条通道纪律；最后是用 `install_bundle` 才装干净的。）
+
+**web 端的边界**：web 受众**不带任何按钮**（`desktopOnline` 为假 → `card-only`）。
+用户明确要求「web 端只需做到通知，不需要交互功能」，验收判据就是判决串里的 `card-only`
+与活动条目的 `actions=0`。**不要**给 web 受众加控件：浏览器里没有可跳转的桌面窗口，
+按钮点了没反应就等于承诺做不到的事。
+
 ## 常用命令
 
 ```powershell

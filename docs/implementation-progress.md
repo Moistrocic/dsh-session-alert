@@ -6,6 +6,49 @@
 
 ---
 
+# 2026-09-25 第十一轮：web 端（只做通知，不做交互）
+
+用户要求：「web 端只需做到通知，不需要交互功能」。结论：**这个边界现有设计本来就满足** ——
+投递完全在 Host 半边（Windows toast），与哪个端在线无关；按钮只在**有 desktop 端在线**时
+才给（`desktopOnline`），因此**只有 web 端在线时卡片是 `card-only`**（无按钮）。
+
+## 安装（关键：不要手写 profile 文件）
+
+web profile（`C:\Users\fu\.dsh\profiles\web`）此前把插件钉在
+`"dsh-session-alert": "github:Moistrocic/dsh-session-alert"` —— 装的是**远端 v0.1.0**
+（`lib/index.js` 26KB），本轮实现全都没有；而且 **pnpm-lock.yaml 里没有它的条目**，
+Loader 树里也没有条目（`/state` 回 401 = 请求落到了 Host 自己的 `/api`）。
+
+第一版我手改了 profile 的 `package.json`（改成 `link:`）并手建 junction —— 这**违反了
+官方技能文档的明确要求**：「不要写 profile 的 `package.json`/`cordis.patch.yml`、
+不要在 profile 目录里跑 pnpm；`install_bundle` 会做这些步骤」。正确做法：
+
+```
+plugin_manager  action: install_bundle  target: C:\Code\Projects\dsh-session-alert
+→ {"application":"applied","warnings":[],"packageResult":{"exitCode":0,…}}
+   pnpm: + dsh-session-alert link:C:/Code/Projects/dsh-session-alert
+```
+
+`application: applied` 表示**当场生效**（无需重启）—— 这与桌面端那条「Host 半边改了必须
+重启」不同：那是**替换已在进程里的模块**（ESM 缓存），而这是**新增一个 Loader 行**，
+走的是 profile 的 live patch 重载。
+
+## 验收（全部可机器判定，桌面端已关闭）
+
+| 项 | 证据 |
+| --- | --- |
+| Loader 行存在 | `Config.listConfigs name=dsh-session-alert` → `include:session-alert` |
+| 路由通 | `GET http://127.0.0.1:3080/api/dsh-session-alert/state` → **200**（此前 401） |
+| 跑的是本地代码 | `/state` 里有 `decisions` 与 `aumid.titleInAppName`（v0.2.0 标志） |
+| **通知真的送达** | `POST /test` → `{"ok":true,"code":0,"note":"toast（自有 AUMID）"}` |
+| **卡片不带按钮** | 正常路径 `POST /notify` → 判决串 **`preview:card-only`**，活动条目 `actions=0` |
+| 受众只有 web | `/state` → `clients.liveKinds = ["web"]` |
+| 客户端半边一致 | web 页收到的 `client.js` 与磁盘逐字节相同（rev `2d3122db38fa`，仅多 74B sourcemap 尾） |
+
+即：**web 端只发通知、不带任何交互控件**这件事，既有实现 + 本次安装即可满足，不需要新增功能。
+
+---
+
 # 2026-09-25 第十轮：卡片交互重做——点卡片不做事、按钮承担全部动作、审批可真的批准
 
 ## 0.2 修「点跳转后批准界面延迟」＋「一开始就在前台时卡片被瞬间作废」（**真机观察验收中**）
