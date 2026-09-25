@@ -10,9 +10,15 @@ legacy/
 # 提交信息用的临时文件（PowerShell 无 heredoc，需落文件再传给 git -F）
 .commit-msg*
 
-# 编译产物：启动器由源码在安装时编译，不入库
-experiments/*.exe
-experiments/*.pdb
+# 编译产物：启动器由源码在安装时编译（scripts/build-launcher.ps1），不入库。
+# 仓库里躺着一个可能过期的二进制比没有它更糟——用户会以为它是最新的。
+# 源码是唯一事实来源：lib/launcher/*.cs。
+# 注意写法：忽略 bin/ 下的**内容**但保留目录本身（.gitkeep），
+# 否则一次干净检出后 bin/ 不存在，编译脚本还得自己建目录。
+bin/*
+!bin/.gitkeep
+*.exe
+*.pdb
 
 # 编辑器与系统垃圾
 .DS_Store
