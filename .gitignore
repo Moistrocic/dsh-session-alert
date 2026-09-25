@@ -7,6 +7,9 @@ node_modules/
 # 它只是参考材料，不参与 v2 的构建，故不入库；详见 docs/design-progress.md。
 legacy/
 
+# 提交信息用的临时文件（PowerShell 无 heredoc，需落文件再传给 git -F）
+.commit-msg*
+
 # 编辑器与系统垃圾
 .DS_Store
 Thumbs.db
