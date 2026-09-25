@@ -39,7 +39,7 @@ Deepseek Harness                      ← ① 应用名：Windows 按 AUMID 的�
 几个刻意的选择，都有实测依据：
 
 - **① 由插件同步**：改动「通知署名」会自动写进 AUMID 的显示名（`scripts/set-aumid-display-name.ps1`，幂等 + 回读校验），此后通知最上方那一行就是它；**同步成功后 ② 就不再写**，因为同一句话不该出现两次。
-- **左侧图标**取自 DeepSeek Harness 自己的图标（`npm run build:icon` 生成多尺寸 ICO，注册到 AUMID 与开始菜单快捷方式）。**不要在 toast XML 里写 `<image>`**：那会在正文里多出一个图标。
+- **左侧图标**取自 DeepSeek Harness 自己的图标：源图存在 [`assets/app-icon-source.png`](./assets/app-icon-source.png)，由 `npm run build:icon` 生成多尺寸 ICO 并注册到 AUMID 与开始菜单快捷方式（换 logo 时用 `-Source <新图>` 或直接覆盖那份源图）。**不要在 toast XML 里写 `<image>`**：那会在正文里多出一个图标。
 - **点卡片本身什么都不做**（`activationType="system"`）：只确认收到。所有动作都在明确的按钮上。
 - **「跳转到Harness」** 把桌面窗口显示到最上层（自有协议 → 无控制台启动器，只用 `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)` 这条无焦点路径）。
 - **「批准 / 拒绝」是真的提交决定**：插件作为 DSH 的审批应答者，在轮次内等待你的点击，令牌一次性、有期限，超时或异常一律交回界面作答。安全边界见 [ADR 0007](./docs/adr/0007-approval-controls-submit-decisions.md)。

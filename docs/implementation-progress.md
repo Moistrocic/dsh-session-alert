@@ -14,7 +14,7 @@
 
 ## 安装（关键：不要手写 profile 文件）
 
-web profile（`C:\Users\fu\.dsh\profiles\web`）此前把插件钉在
+web profile（`%USERPROFILE%\.dsh\profiles\web`）此前把插件钉在
 `"dsh-session-alert": "github:Moistrocic/dsh-session-alert"` —— 装的是**远端 v0.1.0**
 （`lib/index.js` 26KB），本轮实现全都没有；而且 **pnpm-lock.yaml 里没有它的条目**，
 Loader 树里也没有条目（`/state` 回 401 = 请求落到了 Host 自己的 `/api`）。
@@ -24,9 +24,9 @@ Loader 树里也没有条目（`/state` 回 401 = 请求落到了 Host 自己的
 不要在 profile 目录里跑 pnpm；`install_bundle` 会做这些步骤」。正确做法：
 
 ```
-plugin_manager  action: install_bundle  target: C:\Code\Projects\dsh-session-alert
+plugin_manager  action: install_bundle  target: <本仓库目录>
 → {"application":"applied","warnings":[],"packageResult":{"exitCode":0,…}}
-   pnpm: + dsh-session-alert link:C:/Code/Projects/dsh-session-alert
+   pnpm: + dsh-session-alert link:<本仓库目录>
 ```
 
 `application: applied` 表示**当场生效**（无需重启）—— 这与桌面端那条「Host 半边改了必须
@@ -61,7 +61,7 @@ plugin_manager  action: install_bundle  target: C:\Code\Projects\dsh-session-ale
 第 2 条的成因：焦点交接没有区分「什么时候获得的焦点」。卡片发出时用户**已经**在前台，
 `desktopFocusSignal()` 会**立刻**判定「用户要去界面」，于是卡片刚出生就被作废 ——
 点哪个按钮都没用。**成因已由用户配置确认**：`suppressWhenFocused: false`
-（`C:\Users\fu\.dsh\dsh-session-alert\config.json`）—— 抑制关掉时，前台的窗口照样发卡片，
+（`%USERPROFILE%\.dsh\dsh-session-alert\config.json`）—— 抑制关掉时，前台的窗口照样发卡片，
 于是这条分支必然被走到。
 
 修法（都在 `lib/index.js`）：
@@ -112,7 +112,7 @@ plugin_manager  action: install_bundle  target: C:\Code\Projects\dsh-session-ale
 
 触发一次工作区之外的写入 → 审批发出 → **用户在通知卡片上点「批准」** → 观测结果：
 
-- 那次写入**成功落盘**（`C:\Users\fu\dsh-approval-probe-2.txt` 已写出并读回）；
+- 那次写入**成功落盘**（`%USERPROFILE%\dsh-approval-probe-2.txt` 已写出并读回）；
 - **界面里没有出现批准弹框** —— 这正是这次要修的那个残留。
 
 即：通知作答时界面提示**从未被创建**，所以没有「收不回来」的东西；上一轮反馈的现象不再复现。
@@ -137,7 +137,7 @@ plugin_manager  action: install_bundle  target: C:\Code\Projects\dsh-session-ale
 - 触发方式：一次**工作区之外**的写入（`workspace-write` 策略下会走审批 seam），
   带 `danger-full-access` 升级请求；
 - 用户看到的是**三个按钮（批准 / 拒绝 / 跳转到Harness）**，并点了**「批准」**；
-- 结果：那次写入**成功落盘**（`C:\Users\fu\dsh-approval-probe.txt` 已生成并读回）。
+- 结果：那次写入**成功落盘**（`%USERPROFILE%\dsh-approval-probe.txt` 已生成并读回）。
 
 这一条同时证明了三件事：Host 半边已重启（应答者与新按钮形状都在跑）、
 「按钮 → 协议激活 → 启动器 → `/decide`」这条通道通、令牌兑现成了 `allowed-once`
@@ -788,7 +788,7 @@ ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]
 `sandbox_permissions` 升级才是稳定触发的那条。
 
 **一个环境事实**：在**本机**把文件策略收窄到 `workspace-write` 之后，**每一条命令都失败**，报
-`SetNamedSecurityInfoW failed (Win32 5): grantWrite(C:\Code\Projects\dsh-session-alert)`
+`SetNamedSecurityInfoW failed (Win32 5): grantWrite(<本仓库目录>)`
 ——沙箱授予工作区写权限时被拒（Win32 5 = 拒绝访问）。演练期间那条命令因此必须走升级路径，
 而这恰好就是触发 `approval/request` 的那一步。（文件类操作不受影响：`edit`/`write` 在
 workspace-write 下正常，这一点也实测过。）
@@ -846,7 +846,7 @@ DSH · 未知会话 正在等待你的回答：      ← 会话名退化、摘�
 
 ```
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
-  -File C:\Code\Projects\dsh-session-alert\scripts\register-protocol.ps1 -Scheme dsh-session-alert …
+  -File <本仓库目录>\scripts\register-protocol.ps1 -Scheme dsh-session-alert …
 ```
 
 单元测试不该改用户的系统设置（幂等也不行）。现在 `freshHarness()` 在挂载前后临时把
@@ -867,7 +867,7 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
 
 ## 当前状态
 
-插件已**装进 `profiles/desktop` 并挂载**（`dsh-session-alert link:C:/Code/Projects/dsh-session-alert`，
+插件已**装进 `profiles/desktop` 并挂载**（`dsh-session-alert link:<本仓库目录>`，
 `application=applied`）。已实测：
 
 | 项 | 证据 |

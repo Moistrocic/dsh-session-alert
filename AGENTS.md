@@ -88,7 +88,7 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
 **桌面端与 web 端是两个 profile**（`~/.dsh/profiles/desktop` 与 `~/.dsh/profiles/web`），
 各有自己的依赖与 Loader 树；**用户级的东西是共享的**：`~/.dsh/dsh-session-alert/config.json`、
 AUMID 注册、协议注册、`bin/` 启动器。两个 profile 都通过
-`"dsh-session-alert": "link:C:/Code/Projects/dsh-session-alert"` 指向本工作区，因此改代码后
+`"dsh-session-alert": "link:<本仓库目录>"` 指向本工作区，因此改代码后
 两端跑同一份；但**生效方式不同**：新增 Loader 行走 profile 的 live patch 重载（立即生效），
 替换已在进程里的模块则要重启那个 Host。
 
@@ -112,7 +112,7 @@ plugin_manager  action: install_bundle  target: <包目录绝对路径>
 ## 常用命令
 
 ```powershell
-npm test                                     # 88 条离线断言（不真发通知，60s 用例超时）
+npm test                                     # 89 条离线断言（不真发通知，60s 用例超时）
 node scripts/selftest.mjs --deliver          # 额外真发一条：**唯一覆盖宿主投递接线的检查**
 npm test -- --toast                          # 额外真发一条通知（走 notify.js 的投递链）
 npm run build:icon                           # 从 DSH 自己的图标重新生成通知图标（assets/）
@@ -123,7 +123,7 @@ node experiments/client-behavior-audit.mjs --mutate  # 自动保存行为审计 
 node experiments/stylesheet-validate.mjs     # 注入的 CSS 是否合法
 node experiments/listener-mode-audit.mjs     # 监听器 dispatch-mode 审计
 node experiments/settings-render-check.mjs   # 设置页渲染（自制替身，不是验收证据）
-node experiments/asar-read.mjs list|read|grep   # 读 DSH 的 app.asar
+node experiments/asar-read.mjs list|read|grep   # 读 DSH 的 app.asar（需先设 DSH_ASAR 指向它）
 ```
 
 `experiments/` 下多为**破坏性的人工验证工具**，刻意不并入 `npm test`。

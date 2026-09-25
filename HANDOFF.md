@@ -17,7 +17,7 @@
 > 以及「20 秒不点、由宽限期兜底」。
 >
 > **web 端（第十一轮）**：插件已在 **web profile** 装好并验证 ——
-> `plugin_manager install_bundle target=C:\Code\Projects\dsh-session-alert`（`application: applied`；
+> `plugin_manager install_bundle target=<本仓库目录>`（`application: applied`；
 > 依赖 `link:` 指向本工作区，pnpm lockfile 同步）；`/state` 从 **401 → 200**；
 > `POST /test` 真发出一条 toast；正常路径判决串 **`preview:card-only`**、活动条目 `actions=0`
 > —— 即 **web 受众只收通知、不带任何交互控件**（用户要求的正是这个边界）。
@@ -219,7 +219,7 @@ ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]   // dsh-hmr 的 Config
    独立证据：`dsh-user-approval` 会向会话追加 `approval/asked` / `approval/decided` 一对事件。
 
 **顺带记一个环境事实**：在**本机**把文件策略收窄到 `workspace-write` 后，**每一条命令都失败**，
-报 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(C:\Code\Projects\dsh-session-alert)`
+报 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<本仓库目录>)`
 ——沙箱要授予工作区写权限时被拒（Win32 5 = 拒绝访问）。也就是说演练期间那条命令必须走升级路径，
 这反而正好是触发 `approval/request` 的那一步。
 

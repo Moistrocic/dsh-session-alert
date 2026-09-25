@@ -33,11 +33,24 @@ import { readFileSync } from 'node:fs'
 
 const argv = process.argv.slice(2)
 const command = argv[0]
-const asarPath = process.env.DSH_ASAR
-  || String.raw`C:\Code\IDE\Deepseek Harness\resources\app.asar`
+/**
+ * app.asar 的路径。**必须由调用方给出**（`DSH_ASAR` 环境变量，或第 2 个参数）：
+ * 它是 DSH 桌面端的安装位置，因机器而异；写死在源码里既没法在别人机器上跑，
+ * 也会把作者机器的目录带进公开仓库。
+ *
+ *   $env:DSH_ASAR = '<DSH 安装目录>\resources\app.asar'
+ *   node experiments/asar-read.mjs list|read|grep ...
+ */
+const asarPath = process.env.DSH_ASAR || argv[1] || ''
 
 if (command === undefined) {
   console.error('用法：node experiments/asar-read.mjs <list|read|grep> <参数>')
+  process.exit(2)
+}
+
+if (asarPath.length === 0) {
+  console.error('需要 app.asar 的路径：设 DSH_ASAR 环境变量，或把它作为第 2 个参数传入。')
+  console.error('例如：$env:DSH_ASAR = \'<DSH 安装目录>\\resources\\app.asar\'')
   process.exit(2)
 }
 

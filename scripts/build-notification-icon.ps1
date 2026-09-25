@@ -23,12 +23,20 @@
 
 [CmdletBinding()]
 param(
-  [string]$Source = 'C:\Code\IDE\Deepseek Harness\resources\icon.png',
+  # 源图。默认用**仓库里那份**（assets/app-icon-source.png，512×512）——
+  # 刻意不写死任何本机安装路径：仓库要能在别人机器上直接跑（公开仓库里也不该出现
+  # 作者机器的目录）。要换图标（例如 DSH 升级后换了 logo）时用 -Source 指一张新图，
+  # 或者先把新图覆盖到 assets/app-icon-source.png。
+  [string]$Source = '',
   [string]$OutDir
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ([string]::IsNullOrWhiteSpace($Source)) {
+  $Source = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\app-icon-source.png'
+}
 
 Add-Type -AssemblyName System.Drawing
 
