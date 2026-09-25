@@ -63,26 +63,41 @@ Windows Terminal，由系统组件代开窗口。
   `stdio: 'ignore'` 与 `windowsHide: true`，实测得到 `NO_CONSOLE`。这也是为什么此处的
   `stdio` **绝不能改成管道**——不仅因为沙箱会拦（命名管道限制 → EPERM），也因为
   `'ignore'` 正是控制台不被分配的原因之一。
-- **协议激活路径必须用 `conhost.exe --headless`。**
+- **协议激活路径：见下方「修订」。**
+
+### 修订（本决定被 ADR 0005 取代了一部分）
+
+本 ADR 初稿把协议激活路径定为 `conhost.exe --headless powershell.exe …`，并把
+「编译成无控制台 exe」列为**已否决**。后续的 [ADR 0005](./0005-windowless-launcher-and-foreground-lock.md)
+推翻了这一处，理由是实测发现 `conhost` 是一个**无窗口的中间进程**，会让激活授权
+失去可操作的落点。因此协议激活路径改为编译成 **GUI 子系统**的独立启动器。
+
+**本 ADR 中「判据」与「为什么隐藏不够」的部分依然有效并被沿用**（两条路径都适用）：
+
+- 判据是 `GetConsoleWindow()` 返回 `NULL`，不是「窗口被隐藏」；
+- `-WindowStyle Hidden` 与 `wscript` 都只是隐藏已分配的控制台，因此不合格；
+- 不分配控制台是一条**贯穿性的启动约束**，适用于将来新增的任何帮助进程。
+
+被取代的只有「协议激活该用哪种启动方式」这一条，以及「编译成 exe」这个替代方案的
+否决结论。**保留 `conhost --headless` 的做法仍然适用于「需要一个无窗口的短命脚本」的
+场景**——只是不适用于需要持有并转移激活授权的场景。
 
 ## 后果
 
-- 协议处理程序的命令行必须是
-  `conhost.exe --headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <script> …`，
-  而不是直接调 `powershell.exe -WindowStyle Hidden`。
-- **`conhost.exe` 是 Windows 10 1809+ 才有的。** 更早的系统上 `conhost --headless`
-  不存在，需要探测后降级到 `-WindowStyle Hidden`（接受一闪）。这个降级是已知的观感损失，
-  不是错误。
-- 「不分配控制台」成为一条**贯穿性的启动约束**，适用于将来新增的任何帮助进程，而不只是
-  上面这两处。
+- 「不分配控制台」是一条贯穿性约束：任何新增的帮助进程都必须满足它，判据是
+  `GetConsoleWindow()` 返回 `NULL`，而不是「看起来没窗口」。
 - 该判据是可自动化的：探针脚本调用 `GetConsoleWindow()` 并落盘，因此可以纳入验收，
   而不必靠肉眼盯着屏幕捕捉一闪。
+- **`conhost --headless` 需要 Windows 10 1809+。** 在更早的系统上它不存在，需要探测后
+  降级到 `-WindowStyle Hidden`（接受一闪）。这个降级是已知的观感损失，不是错误。
 
 ## 考虑过的替代方案
 
 - **`powershell.exe -WindowStyle Hidden`。** 已否决，实测不合格：控制台仍被分配。
 - **`wscript.exe` 启动器。** 已否决，实测不合格：同上，且引入一个额外脚本文件。
-- **把脚本编译成无控制台的 exe。** 已否决：为一个观感问题引入构建步骤与二进制产物，
-  与「插件是一个 npm 包」的形态不符。
 - **接受一闪，认为它无害。** 已否决：对通知插件而言，「不打扰」是核心目标之一，
   告警机制自身不该成为打扰来源。
+- **把脚本编译成无控制台的 exe。** 本 ADR 初稿否决了它（理由：为一个观感问题引入构建
+  步骤与二进制产物）。**该否决已被 [ADR 0005](./0005-windowless-launcher-and-foreground-lock.md)
+  推翻**——因为除了「不闪窗」，还有一个更硬的需求（让激活授权落在可操作的进程上），
+  而只有它能同时满足两者。
