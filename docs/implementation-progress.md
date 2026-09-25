@@ -46,23 +46,51 @@ RESULT: raised=true reverted=True unchanged=True
 
 ## 尚未完成
 
-1. **四类事件的实际触发**：接线已完成（`session/event` 的 `turn/end`、`user-questions/request`、
-   `approval/request`、`api-session/error`），但尚未在真实会话中观察到四类各自触发一次。
-   注意这四类的**投递路径**已分别验证过（见上表），缺的是「事件 → 场景」这一段在真实
-   会话里的观测。
-2. **设置页的完整配置界面**：当前只呈现端别、通知署名、配置文件路径。模板编辑器、开关、
-   铃声配置尚未接。
-3. **ADR 0002 的三种卡片形态**：目前只实现了「一个确认按钮」。ADR 0002 规定：
-   - 普通卡片：一个确认按钮（**不跳转**，跳转由点卡片本身承担）
-   - 审批卡片：**没有**确认按钮，改为批准 / 拒绝
-   - 无控件形态（仅 web 受众）
+1. **四类事件的实际触发**：`turnEnd` 已确认真实触发（见下方「已确证」），
+   另三类（`question` / `approval` / `error`）的接线完成、投递路径也分别验证过，
+   但尚未在真实会话中各自观测到一次。
+2. **设置页的完整配置界面**：已完成（见下方「已确证」）。剩余的是**在 GUI 里人工过一眼**。
+3. **ADR 0002 的审批卡片形态**：普通卡片（一个确认按钮）与无控件形态已实现；
+   审批卡片应是**批准 / 拒绝两个按钮且没有确认按钮**，尚未实现。
 4. **审批按钮的代答路径**（ADR 0003）：批准/拒绝要真的把决定提交给 DSH。技术路径未落地。
-   已知的可用原语是客户端半边的 `uiWorkspace.openSession`（见 design-progress 5.2），
+   已知可用原语是客户端半边的 `uiWorkspace.openSession`（见 design-progress 5.2），
    但「Host 把决定回传给客户端」这条通道尚未验证——动态插件通道是浏览器→Host 单向的。
-5. **web 形态的无控件卡片**：端别决定卡片形状这条（ADR 0001）尚未在投递侧体现——
-   目前所有通知都带按钮。
-6. **焦点抑制的真机验证**：逻辑已接（Host 算 `suppressed` → 分发器扣卡片、响铃），
-   但未在真实焦点变化下验证过。
+5. **焦点抑制的真机验证**：逻辑已接且实测有 `suppressed:chime-only` 记录（见下方），
+   但「用户实际听到铃声」这一环未单独确认。
+6. **Host 半边改动的重挂载**：Host 代码在 DSH 进程内，改动需重新挂载插件才生效。
+   本轮的三项改动（设置页、形状选择、判决串）**客户端部分即时可见**（`link:` 指向工作区），
+   Host 部分待下次重挂载验证。
+
+## 已确证
+
+### 四类事件：`turnEnd` 已在真实会话中触发
+
+信号表实录（plugin 的 `/state` 路由）：
+
+```
+source              session            verdict
+turn/end:completed  session-2624…      suppressed:chime-only     ← 根会话，正常
+turn/end:completed  427ad608-12b…      skipped:not-a-root-session ← 子代理，正确静默
+turn/end:completed  275ce19f-c3f…      skipped:not-a-root-session ← 子代理，正确静默
+```
+
+一次性确认了三件事：
+
+1. **`turnEnd` 真的会触发**，且模板渲染正确：
+   `dsh-session-alert · 开发dsh会话通知插件 已完成一轮，等待你的下一步指令。`
+   ——`{workspace}` 与 `{session}` 都填对了。
+2. **根会话过滤在工作**：队友那两个子代理会话被正确静默，主会话正常。
+3. **焦点抑制在工作**：`suppressed:chime-only` + 计数 `chimes: 4` ——卡片被扣下但铃响了 4 次。
+
+这回答了「装上之后真的会提醒我吗」这个最基本的疑问。
+
+### 设置页与形状选择
+
+- 设置页已在真实环境注册（客户端 bundle 已含新增标记，因 `link:` 指向工作区）。
+- 形状选择：`dispatch` 按「是否有 desktop 端在线」决定带不带按钮；判决串区分
+  `sent:card+button` / `sent:card-only` / `suppressed:chime-only`。
+- 离线自检 [`experiments/shape-check.mjs`](../experiments/shape-check.mjs) 9 项全通过，
+  实测确认空 actions 时生成的脚本数组为空、守卫为假、不建按钮。
 
 ## 验收工具（`experiments/`，均为人工调用，不并入 `npm test`）
 
