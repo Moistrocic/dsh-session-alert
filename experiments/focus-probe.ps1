@@ -30,6 +30,7 @@ using System.Runtime.InteropServices;
 public static class DshFocus {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -67,8 +68,26 @@ try {
   $allowed = [DshFocus]::AllowSetForegroundWindow($ASFW_ANY)
   Write-Log "AllowSetForegroundWindow(ASFW_ANY) = $allowed"
 
-  $r1 = [DshFocus]::ShowWindow($hwnd, $SW_RESTORE)
-  Write-Log "ShowWindow(SW_RESTORE) = $r1"
+  # 显示状态必须分类处理，不能一律 SW_RESTORE：
+  #   - 最大化(minimized=false, maximized=true) → SW_SHOWMAXIMIZED，否则窗口会被缩成普通大小
+  #   - 最小化 → SW_RESTORE
+  #   - 普通可见 → SW_SHOW 即可
+  # 这是一个真实缺陷的修复：早先一律 SW_RESTORE，导致用户的**全屏** DSH 窗口
+  # 在点击通知后被缩成小窗口。
+  $iconic = [DshFocus]::IsIconic($hwnd)
+  $zoomed = [DshFocus]::IsZoomed($hwnd)
+  Write-Log "window state: iconic=$iconic zoomed=$zoomed"
+  $SW_SHOWMAXIMIZED = 3
+  if ($iconic) {
+    $r1 = [DshFocus]::ShowWindow($hwnd, $SW_RESTORE)
+    Write-Log "ShowWindow(SW_RESTORE) = $r1   (原为最小化)"
+  } elseif ($zoomed) {
+    $r1 = [DshFocus]::ShowWindow($hwnd, $SW_SHOWMAXIMIZED)
+    Write-Log "ShowWindow(SW_SHOWMAXIMIZED) = $r1   (原为最大化，保持全屏)"
+  } else {
+    $r1 = [DshFocus]::ShowWindow($hwnd, 5)
+    Write-Log "ShowWindow(SW_SHOW) = $r1   (原为普通可见)"
+  }
   Start-Sleep -Milliseconds 250
 
   $r2 = [DshFocus]::BringWindowToTop($hwnd)
