@@ -1,4 +1,4 @@
-// dsh-session-alert 无控制台启动器
+﻿// dsh-session-alert 无控制台启动器
 //
 // ## 它做什么
 //

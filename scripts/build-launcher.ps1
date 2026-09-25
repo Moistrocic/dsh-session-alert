@@ -197,6 +197,11 @@ $cscArgs = @(
   '/platform:anycpu'
   '/optimize+'
   '/utf8output'
+  # **显式声明源码编码**：.cs 是 UTF-8（.gitattributes 要求 BOM + CRLF），但只靠 BOM
+  # 不够稳——实测过一次：BOM 被工具链抹掉后 csc 按系统 ANSI（中文机器上是 GBK）解码，
+  # 于是**只有中文界面文案变成乱码**，而编译本身一切正常（不报错、产物大小也对），
+  # 直到失败提示框弹出来才看得出来。`/codepage:65001` 让这件事不再取决于 BOM 是否存在。
+  '/codepage:65001'
   '/define:SCHEME_FROM_CONTRACT'   # 让主源码用生成的方案名，而不是兜底值
   ('/out:' + $outExe)
   $source

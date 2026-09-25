@@ -1391,6 +1391,27 @@ test('卡片本身不承载动作：toast 用 activationType="system"', () => {
   assert.ok(!script.includes("SetAttribute('launch'"), '不该有 launch，卡片不跳转也不激活')
 })
 
+test('C# 启动器：源码编码硬要求 + 产物里的中文界面文案完好', () => {
+  // `.cs` 与 `.ps1` 是同一类坑（见 .gitattributes）：csc 读**无 BOM** 的源码会按系统 ANSI
+  // 解码（中文机器上是 GBK），中文界面文案变成乱码，**而编译不报错、产物大小也正常**
+  // ——只有失败提示框弹出来的那一刻才看得出来。因此这里盯两样：源码的 BOM + CRLF，
+  // 以及编译产物里那句中文是否完好。
+  const source = readFileSync(join(PACKAGE_ROOT, 'lib', 'launcher', 'dsh-session-alert-launcher.cs'))
+  assert.ok(source[0] === 0xEF && source[1] === 0xBB && source[2] === 0xBF,
+    'launcher.cs 缺少 UTF-8 BOM（csc 会按 ANSI 读，中文界面文案变乱码）')
+  const text = source.toString('utf8')
+  assert.ok(!/(?<!\r)\n/.test(text), 'launcher.cs 里有裸 LF（.gitattributes 要求 CRLF）')
+
+  // 产物里的字符串字面量是 UTF-16，**起始偏移可能是奇数**：只按偶偏移搜索会漏掉一半字面量，
+  // 于是「中文完好」会被误报成「中文乱码」——本轮就被这个假象骗了一次，查了半天编码。
+  const exe = readFileSync(join(PACKAGE_ROOT, 'bin', 'dsh-session-alert.exe'))
+  const even = exe.toString('utf16le')
+  const odd = exe.subarray(1).toString('utf16le')
+  for (const phrase of ['这个决定已经失效', '没能把决定交给 DSH']) {
+    assert.ok(even.includes(phrase) || odd.includes(phrase),
+      `编译产物里找不到中文文案「${phrase}」——先跑 npm run build:launcher 重建，再看是不是编码问题`)
+  }
+})
 if (process.argv.includes('--deliver')) {
   test('宿主真的能投递（这一条会真发一条通知；只在你显式要求时跑）', async () => {
     // **这一条才是能抓住上面那个缺陷的检查**：它把插件真的挂起来、真的走一次投递。
