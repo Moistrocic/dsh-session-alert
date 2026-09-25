@@ -55,9 +55,10 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
    （`scripts/set-aumid-display-name.ps1`），同步成功后自有 AUMID 就不再写标题行
    （后备 AUMID 始终写）。**不要为了让那行改名去重命名开始菜单快捷方式**：
    快捷方式的名字是 `isAumidRegistered()` 的判据，改名会让插件退回后备 AUMID。
-   通知图标同理走两条路：注册表 `IconUri` + 快捷方式图标（当场生效），
-   以及 toast 的 `appLogoOverride`（Host 侧）。图标由 `npm run build:icon` 从
-   DSH 自己的 `resources\icon.png` 生成（PNG + 多尺寸 ICO），产物在 `assets/`。
+   **通知左侧那个图标同理只能靠应用身份**（注册表 `IconUri` + 快捷方式图标，由
+   `npm run build:icon` 从 DSH 自己的 `resources\icon.png` 生成多尺寸 ICO）。
+   **不要在 toast XML 里写 `<image placement="appLogoOverride">`**：那会在**正文里多出一个
+   图标**（用户实测反馈：「标题的图标正常，内容为什么还有一个图标？」）。XML 里一个 image 都不写。
 3. **动作的结果必须报在动作旁边。** 「发送这条通知」的按钮在页面中部，而提示一开始报在
    页面底部的「操作」行——用户点了按钮、结果出现在屏幕外，反馈就是「按了没反应」。
    `notice` 因此带 `where`，行为审计会用**祖先链**断言提示确实在按钮那一行里。

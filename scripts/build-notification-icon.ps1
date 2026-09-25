@@ -1,12 +1,15 @@
-﻿# 从 DeepSeek Harness 应用自己的图标生成插件要用的两份资源。
+﻿# 从 DeepSeek Harness 应用自己的图标生成通知用的图标资源。
 #
 # ## 为什么要有这个脚本
 #
-# 通知上的图标有两个来源，需要两种格式：
-#   - **应用身份图标**（注册表的 `IconUri` 与开始菜单快捷方式的图标）：Windows 认 `.ico`，
-#     因此生成一份多尺寸 ICO（16/24/32/48/64/128/256）——只放一张大图会让任务栏/通知里
-#     显示成缩略的模糊小图。
-#   - **toast 的 `appLogoOverride`**：toast XML 的 `<image>` 认 PNG/JPG，因此生成一份 256×256 PNG。
+# 通知左侧那个图标来自**应用身份**：注册表的 `IconUri` 与开始菜单快捷方式的图标。
+# Windows 认 `.ico`，因此生成一份多尺寸 ICO（16/24/32/48/64/128/256）——只放一张大图
+# 会让任务栏/通知里显示成缩略的模糊小图。
+#
+# **刻意不生成给 toast XML 用的 PNG。** 曾经生成过，并写成
+# `<image placement="appLogoOverride">`，结果是通知**正文里多出一个图标**：应用图标本来
+# 就已经显示在标题左侧了。用户实测反馈就是「标题的图标正常，内容为什么还有一个图标？」。
+# 只留 ICO 一条路，少一个元素也少一类坑。
 #
 # 图标来源是 DSH 安装目录里的 `resources\icon.png`（1024×1024）。它是**外部资源**，
 # 大版本升级后可能变样，所以这里做成可复跑的脚本，而不是把图直接改一改塞进仓库就不管了。
@@ -39,7 +42,6 @@ if (-not (Test-Path -LiteralPath $Source)) {
 }
 if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -Path $OutDir -ItemType Directory -Force | Out-Null }
 
-$pngPath = Join-Path $OutDir 'notification-icon.png'
 $icoPath = Join-Path $OutDir 'notification-icon.ico'
 
 # 从源图渲染出指定边长的一张位图（等比缩放居中，保留透明通道）。
@@ -68,11 +70,7 @@ function New-Square([int]$Size, [System.Drawing.Image]$Image) {
   return $bmp
 }
 
-# 1) toast 用的 PNG（256×256）
-$png = New-Square 256 $sourceImage
-try { $png.Save($pngPath, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $png.Dispose() }
-
-# 2) IconUri / 快捷方式用的多尺寸 ICO。
+# IconUri / 快捷方式用的多尺寸 ICO。
 #
 # ICO 容器是自己拼的：Vista 以后允许条目里直接放 PNG 数据，而 .NET 没有公开的
 # 多尺寸 ICO 写出 API（`Icon.Save` 只能存单张）。格式：
@@ -114,13 +112,6 @@ $sourceImage.Dispose()
 
 # --- 校验：尺寸/条目数/PNG 签名都要真的对得上，而不是「写完了就算」 ------------------
 $ok = $true
-$pngBytes = [System.IO.File]::ReadAllBytes($pngPath)
-$pngOk = $pngBytes.Length -gt 100 -and $pngBytes[0] -eq 0x89 -and $pngBytes[1] -eq 0x50
-$pngSize = if ($pngOk) {
-  ([int]$pngBytes[16] * 16777216 + [int]$pngBytes[17] * 65536 + [int]$pngBytes[18] * 256 + [int]$pngBytes[19])
-} else { 0 }
-if (-not $pngOk -or $pngSize -ne 256) { $ok = $false }
-
 $icoBytes = [System.IO.File]::ReadAllBytes($icoPath)
 $icoCount = [int]$icoBytes[4] + [int]$icoBytes[5] * 256
 if ($icoCount -ne $sizes.Count) { $ok = $false }
@@ -129,8 +120,8 @@ foreach ($blob in $blobs) {
 }
 
 Write-Host "源文件   : $Source"
-Write-Host "PNG      : $pngPath（$($pngBytes.Length) 字节，${pngSize}x${pngSize}）"
+
 Write-Host "ICO      : $icoPath（$($icoBytes.Length) 字节，$icoCount 个尺寸：$($sizes -join '/')）"
 if (-not $ok) { [Console]::Error.WriteLine('生成后校验未通过'); exit 4 }
-Write-Host '两份资源都已生成并校验。' -ForegroundColor Green
+Write-Host '图标资源已生成并校验。' -ForegroundColor Green
 exit 0

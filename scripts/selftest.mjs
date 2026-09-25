@@ -1165,30 +1165,22 @@ test('默认正文不含 {workspace}（它在通知里既重复又容易被当�
   assert.ok(contract.VARIABLES.some((v) => v.name === 'workspace'), 'workspace 变量不该被删掉')
 })
 
-test('toast 脚本：给了图标路径就写 appLogoOverride，没给就完全不写', () => {
-  const withIcon = notify.buildToastScript({ title: 'T', body: 'B', iconPath: 'C:\\a\\b\\icon.png' })
-  // Win32 应用引用本地图片用 `file:///`，且路径里的反斜杠要换成斜杠。
-  assert.match(withIcon, /\$iconUri = 'file:\/\/\/C:\/a\/b\/icon\.png'/)
-  assert.match(withIcon, /SetAttribute\('placement', 'appLogoOverride'\)/)
-  // **元素创建必须在「路径非空」的守卫里**：否则空路径会往通知里塞一个裂图占位。
-  const guard = withIcon.indexOf('if ($IconUri.Length -gt 0) {')
-  const create = withIcon.indexOf("$imageNode = $document.CreateElement('image')")
-  assert.ok(guard >= 0, '缺少 $IconUri 非空守卫')
-  assert.ok(create > guard, '图标元素必须写在守卫内部')
-
-  const without = notify.buildToastScript({ title: 'T', body: 'B' })
-  assert.match(without, /\$iconUri = ''/, '没给图标时应当传空串（运行时就不写该元素）')
+test('toast XML 里**不放**任何图标元素（放了会让正文多出一个图标）', () => {
+  // 通知左侧那个图标由应用身份提供（注册表 IconUri + 快捷方式图标）。toast XML 里再写一个
+  // `<image placement="appLogoOverride">` 会在**正文里**多出一个图标——用户实测反馈：
+  // 「标题的图标正常，内容为什么还有一个图标？」所以这里断言的是**没有** image 元素。
+  const script = notify.buildToastScript({ title: 'T', body: 'B' })
+  assert.ok(!script.includes("CreateElement('image')"), 'toast XML 里不该创建 image 元素')
+  assert.ok(!script.includes('appLogoOverride'), '不该出现 appLogoOverride')
+  assert.ok(!script.includes('file:///'), '不该引用本地图片')
+  // 反向：标题行与正文节点仍然照写——别为了删图标把内容一起删了。
+  assert.match(script, /CreateElement\('text'\)/)
+  assert.match(script, /if \(\$WithTitle\) \{/)
 })
 
-test('通知图标资源存在且格式正确（PNG 256×256 / 多尺寸 ICO）', () => {
+test('通知图标资源存在且格式正确（多尺寸 ICO）', () => {
   // 图标是从 DeepSeek Harness 自己的图标生成的（scripts/build-notification-icon.ps1），
-  // 属于**外部来源的产物**：它被删掉或压坏了不会有任何报错，只会让通知里少一个图标。
-  const png = readFileSync(join(PACKAGE_ROOT, 'assets', 'notification-icon.png'))
-  assert.equal(png[0], 0x89, 'PNG 签名不对')
-  assert.equal(png[1], 0x50, 'PNG 签名不对')
-  assert.equal(png.readUInt32BE(16), 256, 'PNG 应当是 256×256')
-  assert.equal(png.readUInt32BE(20), 256, 'PNG 应当是 256×256')
-
+  // 属于**外部来源的产物**：被删掉或压坏了不会有任何报错，只会让通知里少一个图标。
   const ico = readFileSync(join(PACKAGE_ROOT, 'assets', 'notification-icon.ico'))
   assert.equal(ico.readUInt16LE(0), 0, 'ICO reserved 字段应为 0')
   assert.equal(ico.readUInt16LE(2), 1, 'ICO type 字段应为 1（图标）')
