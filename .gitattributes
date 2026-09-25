@@ -1,8 +1,12 @@
 # 统一按 LF 存储；避免 core.autocrlf=true 带来的反复转换与警告。
 * text=auto eol=lf
 
-# Windows 上确实需要 CRLF 的文件（目前没有，留作约定）
+# PowerShell 脚本必须用 CRLF：LF 换行会让 Windows PowerShell 5.1 的
+# param(...) 块解析失败（报 "Unexpected token ')'"）。此处显式声明，
+# 使脚本以 CRLF 检出，并在提交时归一化——否则每次改动都会整文件 diff。
 *.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
