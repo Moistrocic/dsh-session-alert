@@ -64,6 +64,7 @@ const { auditClientAutosave, sampleState } = await import(
 const {
   SESSION_TITLE,
   approvalRequestPayload,
+  callRoute,
   freshHarness,
   postClientState,
   questionRequestPayload,
@@ -977,8 +978,8 @@ test('设置页标签名按语言给：中文「会话通知」，其余语言�
   assert.equal(evidence.titleEn, 'Session Alert')
 })
 
-test('行为审计本身有效：破坏自动保存、加回保存按钮、改回标签名，都必须被抓出来', async () => {
-  // 变异测试。一个不会失败的检查等于没有检查——这三种破坏各自对应需求的一半。
+test('行为审计本身有效：破坏自动保存、加回保存按钮、拿走发送按钮、改回标签名，都必须被抓出来', async () => {
+  // 变异测试。一个不会失败的检查等于没有检查——这四种破坏各自对应需求的一半。
   const mutations = [
     {
       label: '去掉「卸载时保存」',
@@ -987,8 +988,13 @@ test('行为审计本身有效：破坏自动保存、加回保存按钮、改�
     },
     {
       label: '给按钮文案塞上「保存」',
-      source: CLIENT_SOURCE.replace("sendTest: '发一条测试通知',", "sendTest: '保存并发送',"),
+      source: CLIENT_SOURCE.replace("sendPreview: '发送这条通知',", "sendPreview: '保存',"),
       expect: /保存.*按钮/,
+    },
+    {
+      label: '把「发送这条通知」按钮降级成普通按钮',
+      source: CLIENT_SOURCE.replace("className: 'dsa-btn dsa-btn-primary dsa-btn-sm',", "className: 'dsa-btn dsa-btn-sm',"),
+      expect: /找不到「发送这条通知」按钮/,
     },
     {
       label: '把标签名改回去',
@@ -1005,6 +1011,83 @@ test('行为审计本身有效：破坏自动保存、加回保存按钮、改�
       `${mutation.label} 必须被抓出来，实际：${JSON.stringify(problems)}`,
     )
   }
+})
+
+// ------------------------------------------------------- 设置页的「发送这条通知」
+//
+// 预览投递（`bypass`）的语义只有一条：**用户当场按下的动作必须看得见结果**。
+// 因此它绕过去重、场景开关、场景最小间隔、限流与抑制；但不绕总开关
+// （「别给我发通知」是明确意图，此时该如实回一句，而不是照发）。
+// 另外它**不占用限流窗口**——否则点两下预览就能把一条真实提醒挤掉，而用户不会预料到。
+
+test('预览投递绕过去重、场景开关、最小间隔、限流与抑制', async () => {
+  const h = harness({
+    patch: (c) => {
+      c.scenarios.turnEnd.enabled = false            // 关着的场景也该能预览
+      c.scenarios.turnEnd.minIntervalSeconds = 600   // 冷却中
+      c.rateLimit.max = 1
+      c.suppressWhenFocused = true
+    },
+  })
+  // 先把限流窗口占满
+  h.dispatcher.dispatch({ scenario: 'approval', body: '占位', dedupeKey: 'x' })
+  await h.settle()
+  // 普通投递此刻会被拦下
+  const blocked = h.dispatcher.dispatch({ scenario: 'turnEnd', body: '普通投递', dedupeKey: 'y' })
+  assert.notEqual(blocked.sent, true, '普通投递应当被限流/开关拦下')
+  // 预览照样发得出去，而且带抑制也不会被扣下
+  const preview = h.dispatcher.dispatch({
+    scenario: 'turnEnd', body: '预览这条', dedupeKey: 'z', suppressed: true, bypass: true,
+  })
+  assert.equal(preview.sent, true, `预览应当发出，实际 ${JSON.stringify(preview)}`)
+  await h.settle()
+  assert.equal(h.sent[h.sent.length - 1].body, '预览这条')
+})
+
+test('预览投递不占用限流窗口，也不更新场景冷却', async () => {
+  const h = harness({ patch: (c) => { c.rateLimit.max = 2 } })
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(h.dispatcher.dispatch({ scenario: 'turnEnd', body: `预览 ${i}`, bypass: true }).sent, true)
+  }
+  await h.settle()
+  assert.equal(h.dispatcher.snapshot().windowUsed, 0, '预览不该占用限流窗口')
+  // 窗口没被占用，真实投递仍有完整额度。
+  assert.equal(h.dispatcher.dispatch({ scenario: 'turnEnd', body: '真实 1', dedupeKey: 'r1' }).sent, true)
+  assert.equal(h.dispatcher.dispatch({ scenario: 'turnEnd', body: '真实 2', dedupeKey: 'r2' }).sent, true)
+})
+
+test('预览投递仍然尊重总开关', () => {
+  const h = harness({ patch: (c) => { c.enabled = false } })
+  const result = h.dispatcher.dispatch({ scenario: 'turnEnd', body: '预览这条', bypass: true })
+  assert.deepEqual(result, { sent: false, reason: 'plugin-disabled' })
+})
+
+test('预览连点两下都发得出去，且不污染去重表', async () => {
+  const h = harness()
+  assert.equal(h.dispatcher.dispatch({ scenario: 'turnEnd', body: '一样的', dedupeKey: 'same', bypass: true }).sent, true)
+  assert.equal(h.dispatcher.dispatch({ scenario: 'turnEnd', body: '一样的', dedupeKey: 'same', bypass: true }).sent, true)
+  await h.settle()
+  assert.equal(h.sent.length, 2, '两次预览都应当真的发出去')
+  // 同样正文的真实事件不该因为刚才的预览被判成重复。
+  assert.equal(h.dispatcher.dispatch({ scenario: 'turnEnd', body: '一样的', dedupeKey: 'same' }).sent, true)
+})
+
+test('预览接口：未知场景与空正文都如实回 400，不发任何东西', async () => {
+  // 只打**不会真的投递**的分支：合法请求会走投递链（真发通知），那由 dispatcher 的单测覆盖。
+  const h = freshHarness()
+  const unknown = await callRoute(
+    h.routes.find((r) => r.kind === 'prefix'),
+    'POST', '/api/dsh-session-alert/notify', JSON.stringify({ scenario: 'nope', body: 'x' }),
+  )
+  assert.equal(unknown.status, 400, `未知场景应当回 400，实际 ${unknown.status}`)
+  assert.match(String(unknown.body.error), /未知场景/)
+
+  const empty = await callRoute(
+    h.routes.find((r) => r.kind === 'prefix'),
+    'POST', '/api/dsh-session-alert/notify', JSON.stringify({ scenario: 'turnEnd', body: '   ' }),
+  )
+  assert.equal(empty.status, 400, `空正文应当回 400，实际 ${empty.status}`)
+  assert.match(String(empty.body.error), /预览为空/)
 })
 
 if (process.argv.includes('--toast')) {

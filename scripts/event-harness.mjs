@@ -189,11 +189,16 @@ export async function readState(routes) {
 }
 
 /**
- * 往替身路由打一个请求，返回解析后的正文。
+ * 往替身路由打一个请求，返回解析后的正文与**真实状态码**。
  *
  * 用真实的 `Readable` 作为请求体，而不是手写的 async iterator：手写版本与 Node 的
  * 流协议不完全一致，会让读取请求体的处理器抛错，探针于是报错——那是**探针的问题**，
  * 却看起来像端点坏了。
+ *
+ * **状态码取自替身响应的 `statusCode`，不是从正文里猜的。** 这一点是补测「预览接口
+ * 应当回 400」时才发现的：早先的版本把「正文里含『未知端点』」当作 404、其余一律记 200，
+ * 于是任何**非 404 的失败**（比如 400）都被记成 200——断言看起来在检查状态码，
+ * 实际检查的是那句错误文案。这正是本项目反复强调的那类错误：**先确认判据本身成立**。
  *
  * @param {object} route - 一条路由。
  * @param {string} method - HTTP 方法。
@@ -202,7 +207,6 @@ export async function readState(routes) {
  * @returns {Promise<{ status: number, body: any }>} 状态码与正文。
  */
 export async function callRoute(route, method, url, body) {
-  let status = 0
   let captured = null
   const stream = Readable.from(body === undefined ? [] : [Buffer.from(body, 'utf8')])
   const request = Object.assign(stream, {
@@ -211,19 +215,18 @@ export async function callRoute(route, method, url, body) {
     socket: { remoteAddress: '127.0.0.1' },
     headers: { host: '127.0.0.1:19387' },
   })
+  const response = {
+    statusCode: 0,
+    setHeader: () => {},
+    end: (text) => { try { captured = JSON.parse(text) } catch { captured = text } },
+  }
+  let status = 0
   try {
-    await route.handler(request, {
-      statusCode: 0,
-      setHeader: () => {},
-      end: (text) => { try { captured = JSON.parse(text) } catch { captured = text } },
-    })
-    status = 200
+    await route.handler(request, response)
+    status = response.statusCode > 0 ? response.statusCode : 200
   } catch (error) {
     status = -1
   }
-  // 未知端点回 404——替身没有保存 statusCode，因此按响应体识别。
-  const text = typeof captured === 'string' ? captured : JSON.stringify(captured)
-  if (text.includes('未知端点')) status = 404
   return { status, body: captured }
 }
 

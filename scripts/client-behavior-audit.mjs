@@ -19,37 +19,27 @@
 // 否则上面第 3、4 条在替身里根本测不到——见那个模块的注释。
 import { makeDom, uniqueSourceUrl } from './client-style-audit.mjs'
 import { makeReact, syncThenable } from './client-react-stub.mjs'
+import { SCENARIOS, SCENARIO_IDS, VARIABLES, defaultConfig } from '../lib/contract.js'
 
 /**
- * 与真实 `/state` **同形状**的假快照（字段取自实测输出，默认值取当前契约）。
+ * 与真实 `/state` **同形状**的假快照。
  *
- * 放在这里导出，好让 `npm test` 与独立入口 `experiments/client-behavior-audit.mjs`
- * 用同一份——两份快照迟早漂移，而漂移的那份不会有人发现。
- * 注意它是**形状**的样本，不是数值的断言：数值断言在 selftest 里。
+ * `config` 与 `contract` **直接取自契约**（`defaultConfig()` 与 `SCENARIOS`），不手抄。
+ * 这不是洁癖：第一版手抄了一份，其中 `contract.scenarios` 写成了空数组，于是
+ * `TemplateEditor` 找不到场景、`return null`，**整个「通知内容」卡片在树里根本不存在**——
+ * 审计于是「找不到发送按钮」，而那是**审计自己的数据不对**，不是产品的问题。
+ * （假失败和假通过一样有害：它会让人去修一个正确的地方。）
+ *
+ * 只有那些与契约无关的运行时字段（客户端在线状态、活动列表）才是这里写的。
  */
 export function sampleState() {
   return {
     ok: true,
-    config: {
-      enabled: true,
-      title: 'DSH Session Alert',
-      sound: true,
-      onlyRootSessions: true,
-      skipAbortedTurns: true,
-      suppressWhenFocused: true,
-      chime: { enabled: true, source: 'system', filePath: '' },
-      rateLimit: { enabled: true, max: 3, windowSeconds: 10, coalesce: true },
-      scenarios: {
-        turnEnd: { enabled: true, minIntervalSeconds: 0, durationSeconds: 30, body: '{workspace} · {session} 已完成一轮，等待你的下一步指令。' },
-        question: { enabled: true, minIntervalSeconds: 0, durationSeconds: 0, body: '{workspace} · {session} 正在等待你的回答：{summary}' },
-        approval: { enabled: true, minIntervalSeconds: 0, durationSeconds: 0, body: '{workspace} · {session} 等待你的授权：工具 {tool}' },
-        error: { enabled: true, minIntervalSeconds: 0, durationSeconds: 0, body: '{workspace} · {session} 执行出错：{summary}' },
-      },
-    },
+    config: defaultConfig(),
     contract: {
-      scenarios: [],
-      variables: [],
-      scenarioIds: ['turnEnd', 'question', 'approval', 'error'],
+      scenarios: SCENARIOS,
+      variables: VARIABLES,
+      scenarioIds: SCENARIO_IDS,
     },
     configPath: 'C:\\Users\\fu\\.dsh\\dsh-session-alert\\config.json',
     aumid: { primary: 'DSH Session Alert', registered: true },
@@ -112,8 +102,9 @@ export async function auditClientAutosave(options) {
     else globalThis[name] = value
   }
 
-  // ---- 受控 fetch：把「写配置」与「读状态」分开记账 ----
+  // ---- 受控 fetch：把「写配置」「发预览」「读状态」分开记账 ----
   const configPosts = []
+  const previewPosts = []
   let definition = null
   const fetchStub = (url, init) => {
     const method = init !== undefined && init !== null && init.method !== undefined ? init.method : 'GET'
@@ -125,6 +116,12 @@ export async function auditClientAutosave(options) {
       evidence.posts.push(JSON.stringify(body))
       // Host 会归一化后回给客户端；替身原样回，因此「回填」不该引起第二次保存。
       return syncThenable({ ok: true, json: () => syncThenable({ ok: true, config: body, persisted: true }) })
+    }
+    if (target.indexOf('/notify') >= 0 && method === 'POST') {
+      let body = null
+      try { body = JSON.parse(init.body) } catch { body = null }
+      previewPosts.push(body)
+      return syncThenable({ ok: true, json: () => syncThenable({ ok: true, outcome: { sent: true } }) })
     }
     if (target.indexOf('/client-state') >= 0 || target.indexOf('/test') >= 0) {
       // 上报与测试通知：组件只调 `.catch()`，返回一个带 catch 的空壳即可。
@@ -252,20 +249,65 @@ export async function auditClientAutosave(options) {
   }
 
   let numberInput = null
+  let sendButton = null
+  let previewText = ''
+  const buttonTexts = []
   walk(tree, (node) => {
     const props = node.props || {}
+    if (node.type === 'button') {
+      buttonTexts.push(`${textOf(node)}[${typeof props.className === 'string' ? props.className : ''}]`)
+    }
     if (node.type === 'button' && /保存|save/i.test(textOf(node))) evidence.saveButtonSeen = true
     if (typeof props.className === 'string' && props.className.indexOf('dsa-hint') >= 0
       && /自动保存/.test(textOf(node))) evidence.hintSeen = true
     if (node.type === 'input' && props.type === 'number' && typeof props.onChange === 'function' && numberInput === null) {
       numberInput = props
     }
+    // 「发送这条通知」是页面上**唯一**的主按钮（保存按钮已经删掉了），因此按类名找它。
+    if (node.type === 'button' && typeof props.className === 'string'
+      && props.className.indexOf('dsa-btn-primary') >= 0 && sendButton === null) {
+      sendButton = { props, text: textOf(node) }
+    }
+    // 预览区那一行：发送的正文必须与它逐字相同（「看到什么就发什么」）。
+    if (typeof props.className === 'string' && props.className.indexOf('dsa-preview-body') >= 0 && previewText === '') {
+      previewText = textOf(node)
+    }
   })
+
+  /** 逐叶比较两份配置，返回发生变化的路径与新值。 */
+  function diffLeaves(left, right, prefix) {
+    const out = []
+    const base = prefix === undefined ? '' : prefix
+    const keys = new Set([...Object.keys(left === null || left === undefined ? {} : left),
+      ...Object.keys(right === null || right === undefined ? {} : right)])
+    for (const key of keys) {
+      const a = left === null || left === undefined ? undefined : left[key]
+      const b = right === null || right === undefined ? undefined : right[key]
+      const path = base === '' ? key : `${base}.${key}`
+      const bothObjects = a !== null && b !== null && typeof a === 'object' && typeof b === 'object'
+        && !Array.isArray(a) && !Array.isArray(b)
+      if (bothObjects) out.push(...diffLeaves(a, b, path))
+      else if (!Object.is(a, b)) out.push({ path, value: b })
+    }
+    return out
+  }
 
   const configDict = dicts.get('dsh-session-alert\u0000zh')
   const enDict = dicts.get('dsh-session-alert\u0000en')
   evidence.titleZh = configDict === undefined ? null : configDict.title
   evidence.titleEn = enDict === undefined ? null : enDict.title
+  evidence.sendButtonText = sendButton === null ? null : sendButton.text
+  evidence.previewText = previewText
+  evidence.buttonTexts = buttonTexts
+
+  /** 重渲染到稳定。点击/改动之后都要走一遍，否则状态更新不会被提交。 */
+  const rerender = () => {
+    for (let pass = 0; pass < 4; pass += 1) {
+      const result = engine.render(component, {})
+      result.commit()
+      if (!result.isDirty()) break
+    }
+  }
 
   // ---- 断言 ----
   if (evidence.saveButtonSeen) {
@@ -280,6 +322,40 @@ export async function auditClientAutosave(options) {
   if (evidence.titleEn !== 'Session Alert') {
     problems.push(`en（其余语言的兜底）字典的标签名应为「Session Alert」，实际 ${JSON.stringify(evidence.titleEn)}`)
   }
+
+  // ---- 「发送这条通知」：在「通知内容」卡片里，按当前场景发一条 ----
+  const expectedSendLabel = configDict === undefined ? null : configDict.sendPreview
+  if (sendButton === null) {
+    problems.push('「通知内容」卡片里找不到「发送这条通知」按钮（它是页面上唯一的 dsa-btn-primary）')
+  } else {
+    if (expectedSendLabel !== null && sendButton.text !== expectedSendLabel) {
+      problems.push(`发送按钮的文案应为 ${JSON.stringify(expectedSendLabel)}，实际 ${JSON.stringify(sendButton.text)}`)
+    }
+    if (previewText === '') {
+      problems.push('读不到预览区那一行——无法核对「看到什么就发什么」')
+    } else {
+      const before = previewPosts.length
+      sendButton.props.onClick()
+      if (previewPosts.length !== before + 1) {
+        problems.push(`点「发送这条通知」应当恰好发一次预览，实际 ${previewPosts.length - before} 次`)
+      } else {
+        const posted = previewPosts[previewPosts.length - 1]
+        if (posted === null || typeof posted !== 'object') {
+          problems.push(`预览请求的正文不是 JSON 对象：${JSON.stringify(posted)}`)
+        } else {
+          if (posted.scenario !== 'turnEnd') {
+            problems.push(`预览应当带上当前选中的场景 id（期望 turnEnd），实际 ${JSON.stringify(posted.scenario)}`)
+          }
+          // **核心断言**：发出的正文与预览区显示的那一行逐字相同。
+          if (posted.body !== previewText) {
+            problems.push(`发出的正文与预览不一致：预览 ${JSON.stringify(previewText)}，发出 ${JSON.stringify(posted.body)}`)
+          }
+        }
+      }
+      rerender()
+    }
+  }
+
   if (numberInput === null) {
     problems.push('元素树里找不到可改动的数字输入框——审计无法驱动「改一个字段」这一步')
     return { problems, evidence }
@@ -289,17 +365,11 @@ export async function auditClientAutosave(options) {
   if (configPosts.length !== 0) {
     problems.push(`刚装载就写了 ${configPosts.length} 次配置——装载不该被当成改动`)
   }
+  const loadedConfig = JSON.parse(JSON.stringify(snapshot.config))
 
   // 二、改一个字段：应当**排一个定时器**，而不是立刻发请求（防抖）。
   const before = configPosts.length
   numberInput.onChange({ target: { value: '5' } })
-  const rerender = () => {
-    for (let pass = 0; pass < 4; pass += 1) {
-      const result = engine.render(component, {})
-      result.commit()
-      if (!result.isDirty()) break
-    }
-  }
   rerender()
   if (configPosts.length !== before) {
     problems.push('改一个字段后立刻写了配置——缺少防抖，用户每敲一下都会写盘')
@@ -309,16 +379,20 @@ export async function auditClientAutosave(options) {
     return { problems, evidence }
   }
 
-  // 三、推着定时器走：应当恰好写一次，且正文里带着新值。
+  // 三、推着定时器走：应当恰好写一次，且内容里带着刚改的那个值。
+  //
+  // **不写死字段名**：审计取的是树里第一个数字输入框，而它属于哪张卡片会随页面结构变化
+  // （第一版写死 `rateLimit.max`，页面上第一个数字框其实是模板编辑器的「显示时长」，
+  //  于是审计报了一个**假失败**）。改判「恰好一处叶子变化、且新值就是刚输入的那个数」，
+  // 这样它既与结构无关，也比原来更严：多写一处、写错值都会被抓出来。
   const pendingMs = pendingTimers().map((t) => t.ms)
   fireTimers()
   if (configPosts.length !== before + 1) {
     problems.push(`防抖到点后应当恰好写 1 次配置，实际 ${configPosts.length - before} 次`)
   } else {
-    const posted = configPosts[configPosts.length - 1]
-    const wrote = posted !== null && posted.rateLimit !== undefined && Number(posted.rateLimit.max) === 5
-    if (!wrote) {
-      problems.push(`写盘的内容里没有新值 rateLimit.max=5：${JSON.stringify(posted && posted.rateLimit)}`)
+    const changed = diffLeaves(loadedConfig, configPosts[configPosts.length - 1])
+    if (changed.length !== 1 || Number(changed[0].value) !== 5) {
+      problems.push(`写盘的内容应当恰好只有一处变化、且新值为 5，实际 ${JSON.stringify(changed)}`)
     }
   }
 
@@ -340,9 +414,9 @@ export async function auditClientAutosave(options) {
   if (configPosts.length !== beforeUnmount + 1) {
     problems.push(`卸载（切换/关闭设置页）时应当立刻写 1 次配置，实际 ${configPosts.length - beforeUnmount} 次`)
   } else {
-    const posted = configPosts[configPosts.length - 1]
-    if (!(posted !== null && posted.rateLimit !== undefined && Number(posted.rateLimit.max) === 7)) {
-      problems.push(`卸载时写盘的内容里没有新值 rateLimit.max=7：${JSON.stringify(posted && posted.rateLimit)}`)
+    const changed = diffLeaves(loadedConfig, configPosts[configPosts.length - 1])
+    if (changed.length !== 1 || Number(changed[0].value) !== 7) {
+      problems.push(`卸载时写盘的内容应当恰好只有一处变化、且新值为 7，实际 ${JSON.stringify(changed)}`)
     }
   }
 

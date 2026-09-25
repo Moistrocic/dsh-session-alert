@@ -48,6 +48,10 @@ async function probeEndpoints(routes) {
     ['POST', '/api/dsh-session-alert/client-state', '{"kind":"desktop","focused":false}'],
     ['POST', '/api/dsh-session-alert/test', '{}'],
     ['POST', '/api/dsh-session-alert/clear-activity', '{}'],
+    // 预览接口只探「会如实回绝」的那条：**未知场景回 400**。
+    // 合法请求会走投递链真发一条通知，因此不在这里探——那由 selftest 的 dispatcher
+    // 单测覆盖（绕过去重/限流/抑制、且不占用限流窗口）。
+    ['POST', '/api/dsh-session-alert/notify', '{"scenario":"nope","body":"x"}'],
   ]
   // 请求的构造复用 `callRoute`（真实 Readable 作为请求体，理由见那里的注释）。
   for (const [method, url, body] of probes) {
@@ -254,6 +258,10 @@ console.log('\n=== 接线存在性 ===')
   check('POST /client-state 返回 200',
     endpoints.get('POST /api/dsh-session-alert/client-state') === 200,
     `实际 ${endpoints.get('POST /api/dsh-session-alert/client-state')}`)
+  // 预览接口：未知场景必须**如实回 400**，而不是静默落到某个分支或假装成功。
+  check('POST /notify 的未知场景返回 400',
+    endpoints.get('POST /api/dsh-session-alert/notify') === 400,
+    `实际 ${endpoints.get('POST /api/dsh-session-alert/notify')}`)
 }
 
 console.log('')

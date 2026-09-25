@@ -34,6 +34,9 @@ console.log(`  排过的定时器      ${JSON.stringify(evidence.debounceMs)}（
 console.log(`  界面上有保存按钮  ${evidence.saveButtonSeen}`)
 console.log(`  自动保存说明      已渲染=${evidence.hintSeen}`)
 console.log(`  标签名            zh=${JSON.stringify(evidence.titleZh)} en=${JSON.stringify(evidence.titleEn)}`)
+console.log(`  发送按钮          ${JSON.stringify(evidence.sendButtonText)}`)
+console.log(`  预览那一行        ${JSON.stringify(evidence.previewText)}`)
+console.log(`  页面上的按钮      ${evidence.buttonTexts.join(' / ')}`)
 
 let failures = 0
 if (main.result.problems.length === 0) {
@@ -55,8 +58,13 @@ if (process.argv.includes('--mutate')) {
     },
     {
       label: '给按钮文案塞上「保存」',
-      source: source.replace("sendTest: '发一条测试通知',", "sendTest: '保存并发送',"),
+      source: source.replace("sendPreview: '发送这条通知',", "sendPreview: '保存',"),
       expect: /保存.*按钮/,
+    },
+    {
+      label: '把「发送这条通知」按钮降级成普通按钮',
+      source: source.replace("className: 'dsa-btn dsa-btn-primary dsa-btn-sm',", "className: 'dsa-btn dsa-btn-sm',"),
+      expect: /找不到「发送这条通知」按钮/,
     },
     {
       label: '把标签名改回去',
