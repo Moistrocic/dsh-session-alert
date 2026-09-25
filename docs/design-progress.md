@@ -288,6 +288,22 @@ SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE|SWP_SHOWWINDOW) = True
 用户确认：DSH 窗口出现在 Chrome 之上，约 10 秒可见
 ```
 
+### 端到端已通过：点通知按钮 → 窗口出现在最上层
+
+把该机制接到**真实按钮点击**上也已实测通过：
+
+```
+15:59:02      通知弹出（DSH 已最小化，Chrome 持有前台）
+15:59:04.292  invoked; args=[dshalertclick://open/?session=click-test-1 | --hold | 15]
+15:59:04.294  sessionId='click-test-1'                  （会话 id 解析正确）
+15:59:04.752  SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE|SWP_SHOWWINDOW) = True
+              用户确认：DSH 窗口出现在 Chrome 之上，约 15 秒
+15:59:20.071  HOLD end: SetWindowPos(HWND_NOTOPMOST) = True
+```
+
+**关键：整个过程 `foregroundPid` 始终是 shell 宿主，不是 DSH** —— 前台锁确实没放行，
+而窗口照样出现在最上层。**核心需求因此不依赖前台焦点。**
+
 **本项目的实际需求就是「用户能看见窗口」**（点通知 → 看到哪个会话需要我），
 因此这条可靠路径足以支撑核心功能；前台焦点只是可选加分项。
 

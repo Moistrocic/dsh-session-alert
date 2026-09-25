@@ -41,11 +41,34 @@ internal static class TopMostRaise
         catch { }
     }
 
+    /// 从被激活的 URL 里取出会话 id。
+    ///
+    /// 协议激活时 Windows 把 URL 作为**第 1 个位置参数**原样传入（实测形如
+    /// `dshalert://open/?session=xxx`，且系统会做规范化，例如补上结尾斜杠）。
+    /// 因此不能只认 `--session` 这种显式开关，必须同时能从查询串里解析。
+    private static string ParseSession(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            string a = args[i];
+            if (string.Equals(a, "--session", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                return args[i + 1];
+            int q = a.IndexOf("session=", StringComparison.OrdinalIgnoreCase);
+            if (q < 0) continue;
+            string rest = a.Substring(q + "session=".Length);
+            int end = rest.IndexOfAny(new[] { '&', '#', ' ' });
+            string value = end < 0 ? rest : rest.Substring(0, end);
+            if (value.Length > 0) return Uri.UnescapeDataString(value);
+        }
+        return "";
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
         _logPath = Path.Combine(Path.GetTempPath(), "topmost-raise.log");
         Log("=== invoked; args=[" + string.Join(" | ", args) + "] ===");
+        Log("sessionId='" + ParseSession(args) + "'");
 
         // 找 DSH 窗口：按进程枚举，取面积最大的有标题顶层窗口。
         // 不用 MainWindowHandle：窗口隐藏时它为 0。
