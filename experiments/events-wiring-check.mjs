@@ -11,85 +11,23 @@
 //
 // 它验证的是**接线**，不是「真实环境下事件会不会到达」。后者只能靠真实观测，
 // 已在 docs/implementation-progress.md 里如实标注。
-import { Readable } from 'node:stream'
-import { apply } from '../lib/index.js'
+// 替身环境与真实载荷**复用 scripts/event-harness.mjs**，不在这里做第二份实现。
+// 两份逻辑迟早漂移，而漂移的那份不会有人发现。
+import {
+  ROOT_SESSION_ID,
+  approvalRequestPayload,
+  callRoute,
+  freshHarness,
+  questionRequestPayload,
+  readState,
+  tick,
+} from '../scripts/event-harness.mjs'
 
 let failures = 0
 function check(label, condition, detail) {
   if (!condition) failures += 1
   console.log(`${condition ? '  ok  ' : ' FAIL '} ${label}${condition ? '' : '  ' + (detail || '')}`)
 }
-
-/**
- * 每个场景用**独立的替身环境**验证。
- *
- * 为什么必须隔离：限流是「每 10 秒最多 N 条」的滑动窗口，若在同一环境里连着投喂
- * 七类事件，后面的会被限流挡掉（实测 approval 与 api-session/error 就因此变成
- * `skipped:rate-limit`）。那不是接线问题，但会让断言误报——而误报比不测更糟，
- * 因为它会让人去"修"一个本来就正确的地方。
- */
-function freshHarness(config) {
-  const handlers = new Map()
-  const routes = []
-  // cordis 传入的作用域对象（`this`）。真实签名是 `(this: Scoped<Agent>, …)`，
-  // 因此处理器用 `this.agent.id` 取会话；替身必须提供它，否则测不到这条路径。
-  const scoped = { agent: { id: 'session-root-1' } }
-  const ctx = {
-    logger: { info: () => {}, warn: () => {} },
-    effect: (fn) => { try { fn() } catch { /* 忽略 */ } ; return () => {} },
-    get: (name) => {
-      if (name === 'sessionQuery') {
-        return {
-          readTitleSnapshot: async () => ({
-            title: { title: '修复登录超时' },
-            session: { cwd: 'C:\\\\Code\\\\Projects\\\\我的项目', isSeeded: false },
-          }),
-        }
-      }
-      if (name === 'agents') return { roots: () => [{ id: 'session-root-1' }] }
-      return undefined
-    },
-    // 路由注册现在走 `ctx.inject(['webServer'], cb)` —— 等依赖就绪再执行。
-    // 替身必须**同步调用该回调**，否则路由一条都注册不上，而本文件针对路由的断言
-    // 会因此静默失效（拿不到 /state 就报「读不到状态」，看起来像插件的问题）。
-    inject: (deps, callback) => {
-      if (Array.isArray(deps) && deps.includes('webServer')) {
-        callback({ webServer: { register: (route) => { routes.push(route); return () => {} } } })
-      }
-      return () => {}
-    },
-    on: (event, handler) => { handlers.set(event, handler) },
-  }
-  // 关掉限流与抑制，让每个场景都能独立地走到投递
-  apply(ctx, Object.assign({ suppressWhenFocused: false, rateLimit: { enabled: false } }, config || {}))
-  return { handlers, routes, ctxs: scoped }
-}
-
-/**
- * 从插件的路由读回信号表与活动列表。
- *
- * 路由形状是**一条 `kind: 'prefix'` 路由**覆盖 ROUTE_PREFIX，端点在其处理器内分派。
- * 早先这里按「路径以 `/state` 结尾」去找路由，那个写法对应的是「每个端点一条路由」的
- * 旧设计——而**旧设计的路由根本没生效**（缺 `kind` 字段），设置页因此收到 404。
- * 自检当时却绿着，因为它只检查了路由**条数**，没检查**形状**。
- */
-async function readState(routes) {
-  const route = routes.find((r) => r.kind === 'prefix' && r.path === '/api/dsh-session-alert')
-  if (route === undefined) return null
-  let captured = null
-  await route.handler(
-    {
-      method: 'GET',
-      url: '/api/dsh-session-alert/state',
-      socket: { remoteAddress: '127.0.0.1' },
-      headers: { host: '127.0.0.1:19387' },
-    },
-    { statusCode: 0, setHeader: () => {}, end: (body) => { captured = JSON.parse(body) } },
-  )
-  return captured
-}
-
-const tick = () => new Promise((r) => setTimeout(r, 30))
 
 /**
  * 逐端点探测前缀路由的**分派是否正确**。
@@ -111,33 +49,10 @@ async function probeEndpoints(routes) {
     ['POST', '/api/dsh-session-alert/test', '{}'],
     ['POST', '/api/dsh-session-alert/clear-activity', '{}'],
   ]
+  // 请求的构造复用 `callRoute`（真实 Readable 作为请求体，理由见那里的注释）。
   for (const [method, url, body] of probes) {
-    let status = 0
-    let captured = null
-    // 用真实的 Readable 作为请求体，而不是手写的 async iterator。
-    // 手写版本与 Node 的流协议不完全一致，会让读取请求体的处理器抛错，
-    // 于是探针报 -1——那是**探针的问题**，却看起来像端点坏了。
-    const stream = Readable.from(body === undefined ? [] : [Buffer.from(body, 'utf8')])
-    const request = Object.assign(stream, {
-      method,
-      url,
-      socket: { remoteAddress: '127.0.0.1' },
-      headers: { host: '127.0.0.1:19387' },
-    })
-    try {
-      await route.handler(request, {
-        statusCode: 0,
-        setHeader: () => {},
-        end: (text) => { try { captured = JSON.parse(text) } catch { captured = text } },
-      })
-      status = 200
-    } catch (error) {
-      status = -1
-    }
-    // 未知端点回 404——替身没保存 statusCode，因此按响应体识别。
-    const text = typeof captured === 'string' ? captured : JSON.stringify(captured)
-    if (text.includes('未知端点')) status = 404
-    out.set(`${method} ${url}`, status)
+    const result = await callRoute(route, method, url, body)
+    out.set(`${method} ${url}`, result.status)
   }
   return out
 }
@@ -146,48 +61,67 @@ async function probeEndpoints(routes) {
 const cases = [
   {
     label: '轮次正常结束 -> turnEnd',
-    fire: (h) => h.get('session/event')({ id: 'session-root-1' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
+    fire: (h) => h.get('session/event')({ id: ROOT_SESSION_ID }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
     expectSource: 'turn/end:completed',
     expectScenario: 'turnEnd',
   },
   {
     label: '轮次出错 -> error（不重复报「结束」）',
-    fire: (h) => h.get('session/event')({ id: 'session-root-1' }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'error', error: { message: '连接被拒绝' } } } }),
+    fire: (h) => h.get('session/event')({ id: ROOT_SESSION_ID }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'error', error: { message: '连接被拒绝' } } } }),
     expectSource: 'turn/end:error',
     expectScenario: 'error',
     expectBodyHas: '连接被拒绝',
   },
   {
     label: '用户打断 -> 跳过',
-    fire: (h) => h.get('session/event')({ id: 'session-root-1' }, { type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason: { kind: 'user' } } } }),
+    fire: (h) => h.get('session/event')({ id: ROOT_SESSION_ID }, { type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason: { kind: 'user' } } } }),
     expectSource: 'turn/end:aborted-by-user',
     expectSkipped: true,
   },
   {
     label: '分叉 -> 跳过',
-    fire: (h) => h.get('session/event')({ id: 'session-root-1' }, { type: 'turn/end', data: { turn: 4, reason: { kind: 'forked' } } }),
+    fire: (h) => h.get('session/event')({ id: ROOT_SESSION_ID }, { type: 'turn/end', data: { turn: 4, reason: { kind: 'forked' } } }),
     expectSource: 'turn/end:forked',
     expectSkipped: true,
   },
   {
     label: 'Agent 提问 -> question',
-    // 真实签名：'user-questions/request'(this: Scoped<Agent>, request, next)
-    // 载荷就是 request 本身，**不带** {agent, request} 外壳；sessionId 取自 `this`。
-    fire: (h, scoped) => h.get('user-questions/request').call(scoped, { question: '要不要保留旧的迁移脚本？' }, () => {}),
+    // **载荷形状照抄 `cordis_inspect_query` 的 Event 契约，不再自己编。**
+    //
+    //   'user-questions/request'(this: Scoped<Agent>, request: AskUserQuestionRequestEvent, next)
+    //   AskUserQuestionRequestEvent = { questions: AskUserQuestionItem[]; agent?: Agent; signal? }
+    //   AskUserQuestionItem        = { id; question; detail?; header?; options?; multiSelect?; intent? }
+    //
+    // 还有一处更硬的依据——发射点自己把 agent 并进了载荷
+    // （`@deepseek-ai/dsh-user-questions/lib/index.js`）：
+    //   ctx.waterfall(scopeTarget(agent, agent), 'user-questions/request', { ...request, agent }, noAnswerer)
+    //
+    // **这里第一版写的是 `{ question: '…' }` 并从 `this` 取会话——两处都与真实形状不符**，
+    // 于是接线测试全绿而真机上通知正文是「未知会话 正在等待你的回答：」（会话名退化、
+    // 摘要为空）。这与 waterfall 那次是**同一个错误的第二次发生**：
+    // 测试造了一个自己满意的载荷，于是只证明了「我能喂饱我自己」。
+    // 会话 id 因此改成放在载荷里的 `session-root-1`（与替身 roots() 一致）。
+    fire: (h, scoped) => h.get('user-questions/request').call(scoped, questionRequestPayload(), () => {}),
     expectSource: 'user-questions/request',
     expectScenario: 'question',
     expectBodyHas: '要不要保留旧的迁移脚本',
+    // 摘要取错字段时正文会是「等待你的回答：」——空摘要，而事件仍然“发出去了”。
+    // 因此这里额外断言会话名被解析出来了（它是 `{session}` 变量的来源）。
+    expectBodyHasAll: ['修复登录超时', '要不要保留旧的迁移脚本'],
   },
   {
     label: '工具待授权 -> approval',
-    fire: (h, scoped) => h.get('approval/request').call(scoped, { toolName: 'run_command' }, () => {}),
+    //   'approval/request'(this: Scoped<Agent>, req: ApprovalRequestEvent, next)
+    //   ApprovalRequestEvent = { agent: Agent; toolName: string; reason?; displayReason?; signal? }
+    fire: (h, scoped) => h.get('approval/request').call(scoped, approvalRequestPayload(), () => {}),
     expectSource: 'approval/request',
     expectScenario: 'approval',
     expectBodyHas: 'run_command',
+    expectBodyHasAll: ['修复登录超时', 'run_command'],
   },
   {
     label: '会话级失败 -> error',
-    fire: (h) => h.get('api-session/error')('session-root-1', '会话失败：磁盘已满'),
+    fire: (h) => h.get('api-session/error')(ROOT_SESSION_ID, '会话失败：磁盘已满'),
     expectSource: 'api-session/error',
     expectScenario: 'error',
     expectBodyHas: '磁盘已满',
@@ -220,8 +154,12 @@ for (const c of cases) {
   const scenarioOk = state.dispatch.recent.some((r) => r.scenario === c.expectScenario)
   const bodyOk = c.expectBodyHas === undefined
     || state.dispatch.recent.some((r) => String(r.body).includes(c.expectBodyHas))
-  check(c.label, hasSignal && scenarioOk && bodyOk,
-    `verdict=${verdict} 场景命中=${scenarioOk} 正文命中=${bodyOk}`)
+  // `expectBodyHasAll`：正文里**每一段**都要出现。用来分开「事件发出去了」与
+  // 「正文渲染对了」——空摘要的情形下事件同样会发出去，只看 fail 不了。
+  const allOk = c.expectBodyHasAll === undefined
+    || state.dispatch.recent.some((r) => c.expectBodyHasAll.every((frag) => String(r.body).includes(frag)))
+  check(c.label, hasSignal && scenarioOk && bodyOk && allOk,
+    `verdict=${verdict} 场景命中=${scenarioOk} 正文命中=${bodyOk} 正文片段齐全=${allOk}`)
   void result
   if (bodyOk && state.dispatch.recent.length > 0) {
     console.log(`         正文: ${state.dispatch.recent[0].body}`)
@@ -247,8 +185,15 @@ for (const c of cases) {
 console.log('\n=== 瀑布事件必须交出决定权（否则会否决真实功能）===')
 {
   const waterfallCases = [
-    { event: 'user-questions/request', payload: { question: '要不要保留旧的迁移脚本？' } },
-    { event: 'approval/request', payload: { toolName: 'run_command' } },
+    // 载荷形状同上面的逐场景用例：取自 `cordis_inspect_query` 的 Event 契约。
+    {
+      event: 'user-questions/request',
+      payload: { questions: [{ id: 'q1', question: '要不要保留旧的迁移脚本？' }], agent: { id: ROOT_SESSION_ID } },
+    },
+    {
+      event: 'approval/request',
+      payload: { agent: { id: ROOT_SESSION_ID }, toolName: 'run_command' },
+    },
   ]
   for (const wc of waterfallCases) {
     const { handlers, ctxs } = freshHarness()

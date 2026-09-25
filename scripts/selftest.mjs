@@ -41,6 +41,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -51,6 +52,22 @@ const contract = await import(pathToFileURL(join(PACKAGE_ROOT, 'lib', 'contract.
 const { auditListenerModes, auditPackageListeners } = await import(
   pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'listener-mode-audit.mjs')).href
 )
+const { auditClientStyleInjection, makeDom, runClientHalf, stripComments } = await import(
+  pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'client-style-audit.mjs')).href
+)
+// 事件接线的替身环境与**真实载荷**。与 experiments/events-wiring-check.mjs 共用一份实现。
+const {
+  SESSION_TITLE,
+  approvalRequestPayload,
+  freshHarness,
+  postClientState,
+  questionRequestPayload,
+  readState,
+  tick,
+} = await import(pathToFileURL(join(PACKAGE_ROOT, 'scripts', 'event-harness.mjs')).href)
+
+/** `lib/client.js` 的文本。样式注入审计要用它跑两种变异。 */
+const CLIENT_SOURCE = readFileSync(join(PACKAGE_ROOT, 'lib', 'client.js'), 'utf8')
 
 const {
   AlertDispatcher,
@@ -716,7 +733,183 @@ test('审计覆盖了事件目录里全部已注册的监听器（新增监听�
   ])
 })
 
-// ------------------------------------------------------- 可选的真机冒烟（--toast）
+// ------------------------------------------------- 客户端半边的样式注入审计
+//
+// 这一组守的是**「改动到底有没有生效」这件事本身**。
+//
+// 设置页的样式曾经从来没有进过文档：静态半边用了 `styles.insert(STYLES)`，而那是
+// **动态半边**才有的闭包实参。静态半边的物化是
+// `registered.factory(this.makeRequire(ownerId, edges))`——**只传一个实参**，
+// 因此 `styles` 是自由变量，全局里也没有它，那条 `typeof styles !== 'undefined'`
+// 的守卫走了 else：代码执行了、日志打了、CSS 一个字符都没进文档。
+//
+// 而它活过了一整轮自检，因为**替身自己造了一个 `globalThis.styles`**
+// （见 experiments/settings-render-check.mjs）。替身把真机上不存在的东西补上了，
+// 于是被执行的正是那条在真机上永远走不到的分支——测试只证明了「我能喂饱我自己」，
+// 与 waterfall 缺陷那次同源。
+//
+// 因此这一组的第一条不是断言「注册了样式」，而是**在「没有 styles」这个真实条件下
+// 跑一遍代码，再检查文档里到底有没有多出标签**。
+
+test('客户端半边在「没有 styles 内置」的真实条件下注入样式标签，且上报里带着实测读数', async () => {
+  const { problems, evidence } = await auditClientStyleInjection({ source: CLIENT_SOURCE })
+  assert.deepEqual(problems, [], `样式注入审计失败：\n  - ${problems.join('\n  - ')}`)
+  // 顺手把关键读数固定下来：这些值本身就是「注入真的发生了」的证据。
+  assert.equal(evidence.tags, 1)
+  assert.ok(evidence.chars > 1000, `注入的 CSS 只有 ${evidence.chars} 字符，像是没注进去`)
+  assert.ok(evidence.rules > 0, '样式标签没有解析出规则')
+  assert.equal(evidence.leftover, 0, '清理之后仍残留样式标签')
+})
+
+test('样式审计本身有效：去掉注入、或改回 styles.insert，都必须被抓出来', async () => {
+  // 变异测试。一个不会失败的检查等于没有检查——它必须先能抓到。
+  const injectionEffect = /ctx\.effect\(function \(\) \{\s*return installStyles\(\)\s*\}, 'dsh-session-alert: styles'\)/
+  assert.match(CLIENT_SOURCE, injectionEffect, '找不到注入效应的原文，变异检查自身已失效')
+
+  // 变异一：整块注入被移除。
+  const withoutInjection = CLIENT_SOURCE.replace(injectionEffect, '/* 变异：注入被移除 */')
+  const mutated = await auditClientStyleInjection({ source: withoutInjection })
+  assert.ok(
+    mutated.problems.some((p) => p.includes('恰好有 1 个')),
+    `去掉注入后必须报出「没有样式标签」，实际：${JSON.stringify(mutated.problems)}`,
+  )
+
+  // 变异二：改回真机上永不执行的那条路。
+  const withDeadApi = CLIENT_SOURCE.replace(
+    injectionEffect,
+    "ctx.effect(function () { return styles.insert(STYLES) }, 'dsh-session-alert: styles')",
+  )
+  const deadProblems = (await auditClientStyleInjection({ source: withDeadApi })).problems
+  assert.ok(
+    deadProblems.some((p) => p.includes('styles.insert')),
+    `改回 styles.insert 后必须报出「这条路在真机上不存在」，实际：${JSON.stringify(deadProblems)}`,
+  )
+})
+
+test('注释里对这个缺陷的解释不会被当成缺陷本身', () => {
+  // 变异检查的检查。源码里写着「原先写的是 `styles.insert(STYLES)`」这句引用，
+  // 第一版审计直接对整份文本匹配，于是**注释里对缺陷的解释被当成了缺陷**，
+  // 对着正确的代码报了一条假失败。判据必须只看可执行代码。
+  assert.match(CLIENT_SOURCE, /styles\.insert/, '源码注释里应当保留对这条死路的说明')
+  assert.ok(!/styles\s*\.\s*insert/.test(stripComments(CLIENT_SOURCE)), '去掉注释后不应再有 styles.insert')
+
+  // 反向确认：把死路写进**代码**（不是注释）时，必须仍然被抓到。
+  assert.match(stripComments('var x = 1; /* styles.insert(a) */ var y = 2'), /var y = 2/)
+  assert.match(stripComments('var x = 1; // styles.insert(a)\nvar y = 2'), /var y = 2/)
+})
+
+test('DOM 替身遇到不认识的选择器必须抛错，不能静默返回空集', () => {
+  // 静默返回空集会让「空集里没有违规」永远为真——本项目在路由自检上正是被这种
+  // 断言坑过（只断言条数、从不检查形状）。
+  const dom = makeDom({})
+  assert.throws(() => dom.document.querySelectorAll('.dsa-root > *:nth-child(2)'), /不支持的选择器/)
+  assert.doesNotThrow(() => dom.document.querySelectorAll('style[data-plugin="dsh-session-alert"]'))
+})
+
+test('DOM 替身不提供 styles：真实页面上没有这个符号，补上它这个审计就失去意义', async () => {
+  const dom = makeDom({})
+  // 故意先放一个假的 styles 进去，确认审计的运行器会把它**删掉**。
+  globalThis.styles = { insert: () => () => {} }
+  try {
+    const run = await runClientHalf({ source: CLIENT_SOURCE, dom })
+    assert.equal(run.error, null, `在删掉 styles 之后运行不应抛错：${run.error && run.error.message}`)
+  } finally {
+    delete globalThis.styles
+  }
+})
+
+
+// ------------------------------------------- 事件载荷形状（照真实契约，不自己编）
+//
+// 这一组守的是**「载荷字段读对了没有」**。它与 `next()` 那条审计是两件事：
+//
+//  - 审计守的是「瀑布监听器有没有交出决定权」；
+//  - 这一组守的是「交出去之前，它有没有把会话与摘要读对」。
+//
+// 为什么必须单独有：这个错误犯过两次，形态相同——**测试的载荷是测试自己编的**。
+// 第二次（本次）表现是通知正文「… · 未知会话 正在等待你的回答：」：会话名退化、
+// 摘要为空，而事件照发、页面上不报任何错。接线测试当时全绿。
+//
+// 因此这里做两件事：
+//  1. 用**真实契约**的载荷跑一遍，断言渲染出的正文（会话名 + 问题原文）；
+//  2. **反向断言**：喂旧的自造形状时，同一条断言必须失败。
+//     没有第 2 条，第 1 条将来还会再失效一次——它以前就失效过。
+//
+// 投递走**抑制路径**（desktop 报在焦点 + 关铃声），因此测试既不弹通知也不发声，
+// 但活动列表里留下完整渲染好的正文。`via` 也一并断言，确保这条测试始终是静默的。
+
+test('question 载荷按真实契约解析：正文里有会话名与问题原文', async () => {
+  const h = freshHarness({ suppressWhenFocused: true, chime: { enabled: false } })
+  await postClientState(h.routes, 'desktop', true)
+  h.handlers.get('user-questions/request').call(h.scoped, questionRequestPayload(), () => {})
+  await tick()
+  const state = await readState(h.routes)
+  assert.notEqual(state, null, '读不到 /state')
+  const entry = state.dispatch.recent[0]
+  assert.ok(entry !== undefined, '没有记录到任何投递')
+  assert.equal(entry.via, 'suppressed-silent', `这条测试必须保持静默，实际 via=${entry.via}`)
+  assert.match(String(entry.body), new RegExp(SESSION_TITLE), '正文里没有会话名（{session} 没解析出来）')
+  assert.match(String(entry.body), /要不要保留旧的迁移脚本/, '正文里没有问题原文（{summary} 取错字段）')
+})
+
+test('旧的自造载荷形状必须无法通过同一条断言（否则测试又在喂饱自己）', async () => {
+  const h = freshHarness({ suppressWhenFocused: true, chime: { enabled: false } })
+  await postClientState(h.routes, 'desktop', true)
+  // 旧形状：顶层的 `question` 字符串，且没有 agent 字段——这正是当初测试自己编的那个。
+  h.handlers.get('user-questions/request').call(h.scoped, { question: '要不要保留旧的迁移脚本？' }, () => {})
+  await tick()
+  const state = await readState(h.routes)
+  const entry = state.dispatch.recent[0]
+  assert.ok(entry !== undefined, '没有记录到任何投递')
+  assert.ok(
+    !/要不要保留旧的迁移脚本/.test(String(entry.body)),
+    `旧形状居然也能渲染出问题原文，说明这条断言的判据不对：${entry.body}`,
+  )
+})
+
+test('approval 载荷按真实契约解析：正文里有会话名与工具名', async () => {
+  const h = freshHarness({ suppressWhenFocused: true, chime: { enabled: false } })
+  await postClientState(h.routes, 'desktop', true)
+  h.handlers.get('approval/request').call(h.scoped, approvalRequestPayload(), () => {})
+  await tick()
+  const state = await readState(h.routes)
+  const entry = state.dispatch.recent[0]
+  assert.ok(entry !== undefined, '没有记录到任何投递')
+  assert.equal(entry.scenario, 'approval')
+  assert.match(String(entry.body), new RegExp(SESSION_TITLE), '正文里没有会话名')
+  assert.match(String(entry.body), /run_command/, '正文里没有工具名')
+})
+
+test('客户端上报的样式实测经 /state 暴露（机器可读的那一半）', async () => {
+  const h = freshHarness()
+  const styles = {
+    injected: true,
+    tags: 1,
+    dynTags: 0,
+    chars: 7459,
+    rules: 68,
+    applied: { display: 'flex', gap: '16px', fontSize: '13px' },
+    error: null,
+  }
+  await postClientState(h.routes, 'desktop', true, styles)
+  const state = await readState(h.routes)
+  const record = (state.clients.styles || []).find((s) => s.kind === 'desktop')
+  assert.ok(record !== undefined, `clients.styles 里没有 desktop 的读数：${JSON.stringify(state.clients.styles)}`)
+  assert.equal(record.report.injected, true)
+  assert.equal(record.report.rules, 68)
+  assert.equal(record.report.applied.display, 'flex')
+  assert.ok(typeof record.ageMs === 'number', '缺少 ageMs，无法判断读数有多旧')
+})
+
+test('缺 styles 字段的上报不会抹掉已有读数（旧客户端不该把诊断清空）', async () => {
+  const h = freshHarness()
+  await postClientState(h.routes, 'desktop', true, { injected: true, tags: 1, chars: 10, rules: 2, applied: null })
+  await postClientState(h.routes, 'desktop', true) // 不带 styles
+  const state = await readState(h.routes)
+  const record = (state.clients.styles || []).find((s) => s.kind === 'desktop')
+  assert.ok(record !== undefined, '不带 styles 的上报把读数抹掉了')
+  assert.equal(record.report.tags, 1)
+})
 
 if (process.argv.includes('--toast')) {
   test('真机冒烟：真发一条通知，按退出码判定实际走通了哪条路径', async () => {

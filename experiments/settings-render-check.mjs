@@ -39,6 +39,8 @@
 // 注意：ESM 有模块缓存，同一个 specifier 只会求值一次。因此这里必须先铺全局量、
 // 再 import；不要试图 import 两次来"重新触发"注册。
 
+import { makeDom } from '../scripts/client-style-audit.mjs'
+
 let failures = 0
 function check(label, condition, detail) {
   if (!condition) failures += 1
@@ -186,9 +188,28 @@ function syncThenable(value) {
 const engine = makeReact()
 const react = engine.react
 
-globalThis.window = { __ModuleLoader__: { load: (d) => { globalThis.__DEF = d } }, addEventListener: () => {} }
+// ---- DOM 替身：复用 scripts/client-style-audit.mjs，不再写第二份 ----
+//
+// **这里以前有一行 `globalThis.styles = { insert: () => () => {} }`，它是本文件最严重的
+// 一处错误，必须单独说明。**
+//
+// 真实页面上**没有** `styles` 这个符号：它是动态半边的闭包实参，而本插件是静态半边
+// （静态半边的物化只传一个实参 `require`）。那行替身把真机上不存在的东西补上了，
+// 于是被执行的正是**在真机上永远走不到的分支**——设置页样式一整个迭代周期都没生效，
+// 而这里一直显示「通过」。
+//
+// 教训与 waterfall 缺陷那次同源：**替身比生产代码更需要被怀疑**。
+// 一个把环境补全到「代码想当然的样子」的替身，测的是替身自己的假设。
+// 样式注入的真判据因此搬去了 scripts/client-style-audit.mjs，那里的替身**拒绝**提供 `styles`。
+const dom = makeDom({ withSettingsRoot: true })
+// 让端别判定走到 desktop 分支：这是本插件实际的运行端别（用户口径亦为「以桌面端为准」）。
+dom.document.documentElement.dataset = { platform: 'win32' }
+
+globalThis.window = { __ModuleLoader__: { load: (d) => { globalThis.__DEF = d } }, addEventListener: () => {}, removeEventListener: () => {} }
+globalThis.document = dom.document
+globalThis.getComputedStyle = dom.getComputedStyle
 globalThis.setInterval = () => 0
-globalThis.styles = { insert: () => () => {} }
+globalThis.clearInterval = () => {}
 globalThis.fetch = () => syncThenable({ ok: true, json: () => syncThenable(snapshot) })
 globalThis.setTimeout = (fn) => { try { fn() } catch { /* 忽略 */ } ; return 0 }
 
@@ -333,6 +354,14 @@ check('变量芯片按场景渲染（turnEnd 应有 workspace/session/time）',
 check('预览区出现示例工作区名', all.includes('我的项目'))
 check('预览区出现示例会话名', all.includes('修复登录超时'))
 check('诊断区显示在线端', all.includes('desktop'))
+// 样式诊断的两行。它们是「设置页为什么不好看」的唯一可判定答案来源——
+// 样式失效时页面不报任何错，只有这两行能把「没注入」与「注入了没生效」分开。
+// 替身注入了 CSS（见上面的 makeDom），因此这里应当读到「已注入」与实测读数。
+check('诊断区渲染出样式注入读数', all.includes('样式注入') && all.includes('已注入'),
+  '实际文本里没有「样式注入／已注入」')
+check('诊断区渲染出样式实测读数（从计算样式读回，不是自报意图）',
+  all.includes('display=flex') && all.includes('gap=16px'),
+  '实际文本里没有 display=flex / gap=16px')
 check('诊断区显示通知署名', all.includes('DSH Session Alert'))
 check('诊断区显示配置文件路径', all.includes('config.json'))
 check('信号表渲染出判决', all.includes('sent:card+button'))

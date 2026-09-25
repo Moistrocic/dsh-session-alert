@@ -2,6 +2,185 @@
 
 本文件记录**代码实现阶段**的状态。设计决策见 [`docs/adr/`](./adr/)，
 被实测证明的事实见 [`design-progress.md`](./design-progress.md)。
+**接手请看 [`HANDOFF.md`](../HANDOFF.md)**，那里是结论与下一步。
+
+---
+
+# 2026-09-25 第二轮：样式根因、热重载机制、载荷形状
+
+## 一、设置页样式：根因是「CSS 从来没有进过文档」
+
+### 症状与代价
+
+功能全部正常（六个区块、模板切换器、预览、诊断都能用），但观感不对：元素堆叠、
+文字与控件挤在一起。用户两次反馈，第二次说「重启后完全没有变化」。
+我上一轮把它当**数值问题**调了好几轮（字号、间距、令牌），那是在猜。
+
+### 根因（源码级证据）
+
+原代码：`if (typeof styles !== 'undefined' && styles.insert) { styles.insert(STYLES) } else { 记一条日志 }`。
+
+| 半边 | 有 `styles` 吗 | 证据 |
+| --- | --- | --- |
+| 动态半边 | **有** | `@deepseek-ai/dsh-cordis-client-runner/lib/client.js` 构造 `DynamicCordisStyles`（`insert()` 把标签打上 `data-dyn`），作为闭包实参传入：`closure(react, taggedConsole(...), styles, host, harnessTrap(), …)` |
+| 静态半边（本插件） | **没有** | `@deepseek-ai/dsh-client-modules/lib/client.js` 的物化：`exports: registered.factory(this.makeRequire(ownerId, edges))` —— **只传一个实参**；工厂是 `(require) => {}`，`styles` 是自由变量 |
+
+第三条：全包 grep `window.styles` / `globalThis.styles` 命中 **0**。
+
+⇒ `typeof styles !== 'undefined'` 走 else，**日志照打、代码照跑、CSS 一个字符没进文档**。
+
+**这个缺陷的全部代价是「改动有没有生效」无从判定**——而这正是上一轮反复出错的地方
+（见 `HANDOFF.md` 第三节的教训）。
+
+### 修法（并保留宿主的样式生命周期）
+
+`lib/client.js` 的 `installStyles()`：自己建 `<style>`，**自己打上 `data-plugin="dsh-session-alert"`**，
+由 `ctx.effect` 管清理。为什么自己打标记而不是让宿主认领（`claimStyles(id)` 会把
+「还没有 `data-plugin`」的标签认领给正在物化的插件）：
+
+- 预打标记的标签不会被**别的**插件顺手认领；
+- 宿主该做的清理照旧会做——`removeOwnedStyles(id)` 在本条目被替换/卸载时移除
+  `style[data-plugin=id]`，因此热重载不会叠加样式。
+
+### 判据（两层，刻意分开）
+
+`probeStyles()` 每次上报都重新读数，字段分两层：
+
+- **标签层**：`injected` / `tags` / `chars` / `rules`（浏览器 CSSOM 解析出的规则数）。
+  「标签在」与「样式可用」是两件事——CSS 语法有问题时标签仍在，规则会少掉。
+- **实测层**：`applied` = `getComputedStyle('.dsa-root')` 的 `display/gap/fontSize`。
+  本插件的样式表把 `.dsa-root` 定为 `display:flex; gap:16px`，普通 div 是 `block/normal`，
+  因此这一读数能区分「标签在但没作用」与「真的生效了」。**它来自浏览器，不来自插件意图。**
+
+读数有三个出口：设置页诊断区两行（人眼）、`client-state` 上报（Host 存下）、
+`/state` 的 `clients.styles`（机器读）。
+
+### 它为什么活过了一整轮自检
+
+`experiments/settings-render-check.mjs` 里有一行
+
+```js
+globalThis.styles = { insert: () => () => {} }
+```
+
+**替身把真机上不存在的东西补上了**，于是被执行的正是那条在真机上永远走不到的分支。
+测试只证明了「我能喂饱我自己」。已删除该行，替身改为复用
+`scripts/client-style-audit.mjs` 里的 DOM，而**那个 DOM 拒绝提供 `styles`**。
+
+### 人眼确认
+
+用户确认「正常了」并给截图：卡片圆角描边、标签在上控件在下、长说明自占一行、
+场景切换是 Pill。截图里设置面板整体半透明是**主题皮肤**的效果——DSH 自己的左侧导航
+同样透出后面的内容，因此本插件与宿主一致。
+
+## 二、客户端半边可以热重载（推翻「必须重启」的一半）
+
+`@deepseek-ai/dsh-client-hmr` 在该 profile 里已挂载（`immediately: true`）：
+
+1. 每 500ms 按 mtime/ctime/size `stat` 每个 client bundle；
+2. 变化 → `clientModules.rebuilt(id)` → SSE `/plugins/events` 推 `{"type":"rebuilt","id","rev"}`；
+3. 页面另一半调 `entries.reload(id, rev)`：作废旧条目、`removeOwnedStyles(id)`、重新物化。
+
+实测记录：
+
+```
+reload 前 ageMs: 22152
+data: {"type":"rebuilt","id":"dsh-session-alert","rev":"dcd8d74d3f10"}
+reload 后 ageMs: 3664        ← 新代码重新 apply（apply 里先注入样式、后上报，故这一跳是证据）
+```
+
+还做了一次**字节级**核对：用当前 rev 从 HTTP 取回被服务的 bundle，
+前 70347 字节与磁盘上的 `lib/client.js` **完全相同**，尾部只多 74 字节
+（`;\n//# sourceMappingURL=??dsh-session-alert/client.js.map&rev=…`，由 loader 追加）。
+即：**页面收到的就是我审过的那一份代码**。
+
+## 三、Host 半边为什么必须重启（机制）
+
+`@deepseek-ai/dsh-hmr`（chokidar，监听 profile 目录）的默认忽略表：
+
+```js
+ignored: [ '**/node_modules', '**/.*', 'cache', 'data' ]
+```
+
+本插件经 `profiles/desktop/node_modules/dsh-session-alert`（junction）链入 profile，
+**它在监听根里的唯一路径落在 `node_modules` 下**，因此被忽略——这就是「改动要重启」的机制。
+
+（可以让 hmr 条目通过 patch 把该路径移出忽略表，但那是改用户 profile 的全局配置，
+本轮没有做。）
+
+## 四、四类事件的真实观测结果
+
+| 场景 | 状态 | 记录 |
+| --- | --- | --- |
+| `turnEnd` | ✅ | `17:22:39 turn/end:completed → suppressed:chime-only`（焦点抑制，`chimes: 1`） |
+| `question` | ✅ | `17:31:40 user-questions/request → sent:card+button`；用户确实收到卡片并作答 |
+| `error` | ✅ 两条路径 | `17:34:51 api-session/error → skipped:not-a-root-session`<br>`17:34:51 turn/end:error → skipped:not-a-root-session` |
+| `approval` | ⛔ | 审批策略为 `never`，DSH 不发出 `approval/request` |
+
+`question` 的观测还确认了 **waterfall 修复在运行环境真的生效**：用户收到了那个问题并作答
+（旧代码会否决整条提问链，问题根本不会出现）。
+
+`error` 的可复现触发方式：用 `workflow` 让一个子代理指向不存在的模型名 →
+子代理 LLM 请求失败 → `agent/error` → `api-session/error`，同轮还落下持久的 `turn/end:error`。
+**一次故障，两条路径各自被记录**，并都被正确判为子代理会话而静默
+（`onlyRootSessions` 的在位证明）。
+
+## 五、真实观测暴露的缺陷：载荷字段读错（同类错误第 3 次）
+
+通知发出去了，正文却是：
+
+```
+DSH · 未知会话 正在等待你的回答：      ← 会话名退化、摘要为空
+```
+
+| 读法 | 真实位置 | 权威依据 |
+| --- | --- | --- |
+| `this.agent.id` | `request.agent.id` | 发射点 `ctx.waterfall(scopeTarget(agent, agent), 'user-questions/request', { ...request, agent }, noAnswerer)`；`dsh-scope` 路由键 `(args) => args[0]['agent']` |
+| `payload.question` | `request.questions[0].question` | Event 契约 `AskUserQuestionRequestEvent = { questions: AskUserQuestionItem[]; agent?; signal? }` |
+
+`approval/request` 的会话来源同样写错（`toolName` 是对的）。
+
+### 为什么接线测试没抓到——以及这次怎么补
+
+测试的载荷是测试自己编的：`{ question: '…' }`，会话从替身 `this.agent` 取。
+**真机上 `this` 不是 Agent**：信号表里该行的会话栏为空，正是它的痕迹。
+
+1. 载荷形状照抄 Event 契约，集中在 `scripts/event-harness.mjs` 一处并注明来源；
+2. 替身的 `this` 改成**空对象**——任何人把会话改回 `this.agent`，测试立刻失败；
+3. 替身的 `sessionQuery` **按 id 应答**。第一版忽略参数，于是「id 取错了照样查到标题」，
+   变异没被抓到才发现——**一个忽略输入的替身会把「输入取错了」整类缺陷遮住**；
+4. `npm test` 加 6 条断言，含**反向断言**：喂旧的自造形状时必须失败。
+
+真机变异验证（两次都恢复原文件、SHA256 一致）：
+
+- `payload.questions` → `[]`：报「正文里没有问题原文（{summary} 取错字段）」
+- `payload.agent` → `this.agent`：报「正文里没有会话名（{session} 没解析出来）」
+
+## 六、`npm test` 不再写用户的注册表
+
+`apply()` 会调 `ensureProtocolRegistered()`，spawn 真的 Windows PowerShell 写
+`HKCU\Software\Classes\dsh-session-alert`。替身挂载期间实测捕到了那个进程：
+
+```
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass
+  -File C:\Code\Projects\dsh-session-alert\scripts\register-protocol.ps1 -Scheme dsh-session-alert …
+```
+
+单元测试不该改用户的系统设置（幂等也不行）。现在 `freshHarness()` 在挂载前后临时把
+`DSH_SESSION_ALERT_POWERSHELL` 指向不存在的路径（`notify.js` 已有的覆盖口子），
+注册被跳过；`npm test --toast` 的真机冒烟不受影响（覆盖是临时且会还原的）。
+修复后同一探针捕获到 **0** 个注册进程。
+
+## 七、这一轮的教训（一句话版）
+
+**「改动有没有生效」必须是一个可判定的问题，否则调参就是猜。**
+本轮之前，这个项目在这一点上栽过三次：调样式数值、判决串新旧代码同形、
+替身补上真机没有的东西。现在样式有审计、HMR 有 rebuilt 帧、状态有 `/state`，
+三者都是机器可读的。
+
+---
+
+# 以下为 2026-09-25 第一轮的记录（保留原文）
 
 ## 当前状态
 
