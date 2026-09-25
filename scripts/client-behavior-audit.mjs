@@ -105,6 +105,8 @@ export async function auditClientAutosave(options) {
   // ---- 受控 fetch：把「写配置」「发预览」「读状态」分开记账 ----
   const configPosts = []
   const previewPosts = []
+  /** 预览端点的应答模式：`'ok'` 正常；`'missing'` 模拟 Host 半边还没重启（404）。 */
+  let notifyMode = 'ok'
   let definition = null
   const fetchStub = (url, init) => {
     const method = init !== undefined && init !== null && init.method !== undefined ? init.method : 'GET'
@@ -120,8 +122,16 @@ export async function auditClientAutosave(options) {
     if (target.indexOf('/notify') >= 0 && method === 'POST') {
       let body = null
       try { body = JSON.parse(init.body) } catch { body = null }
+      if (notifyMode === 'missing') {
+        // 端点不存在时的真实形状：Host 的前缀路由如实回 404 与一句说明。
+        return syncThenable({
+          ok: false,
+          status: 404,
+          json: () => syncThenable({ ok: false, error: '未知端点：POST /api/dsh-session-alert/notify' }),
+        })
+      }
       previewPosts.push(body)
-      return syncThenable({ ok: true, json: () => syncThenable({ ok: true, outcome: { sent: true } }) })
+      return syncThenable({ ok: true, status: 200, json: () => syncThenable({ ok: true, outcome: { sent: true } }) })
     }
     if (target.indexOf('/client-state') >= 0 || target.indexOf('/test') >= 0) {
       // 上报与测试通知：组件只调 `.catch()`，返回一个带 catch 的空壳即可。
@@ -220,21 +230,27 @@ export async function auditClientAutosave(options) {
   evidence.loaded = true
 
   // ---- 收集元素树里的可交互节点 ----
-  function walk(node, visit) {
+  //
+  // `walk` 带上**祖先链**：有它才能断言「反馈出现在按钮所在的那一行」。
+  // 「点了按钮、结果显示在页面底部」正是本轮用户报的「按了没反应」——
+  // 只断言「文本存在」是抓不到这种问题的。
+  function walk(node, visit, ancestors) {
+    const chain = ancestors === undefined ? [] : ancestors
     if (node === null || node === undefined || typeof node === 'boolean') return
     if (typeof node === 'string' || typeof node === 'number') return
-    if (Array.isArray(node)) { for (const item of node) walk(item, visit); return }
-    visit(node)
+    if (Array.isArray(node)) { for (const item of node) walk(item, visit, chain); return }
+    visit(node, chain)
     if (typeof node.type === 'function') {
       // 函数型子组件要求值，否则它们内部的内容一条都遍历不到。
       try {
         const sub = engine.render(node.type, node.props)
         sub.commit()
-        walk(sub.tree, visit)
+        walk(sub.tree, visit, chain)
       } catch { /* 子组件渲染失败不阻断收集 */ }
       return
     }
-    if (node.children) for (const child of node.children) walk(child, visit)
+    const next = chain.concat([node])
+    if (node.children) for (const child of node.children) walk(child, visit, next)
   }
 
   const textOf = (node) => {
@@ -250,9 +266,10 @@ export async function auditClientAutosave(options) {
 
   let numberInput = null
   let sendButton = null
+  let sendButtonRow = null
   let previewText = ''
   const buttonTexts = []
-  walk(tree, (node) => {
+  walk(tree, (node, ancestors) => {
     const props = node.props || {}
     if (node.type === 'button') {
       buttonTexts.push(`${textOf(node)}[${typeof props.className === 'string' ? props.className : ''}]`)
@@ -267,12 +284,53 @@ export async function auditClientAutosave(options) {
     if (node.type === 'button' && typeof props.className === 'string'
       && props.className.indexOf('dsa-btn-primary') >= 0 && sendButton === null) {
       sendButton = { props, text: textOf(node) }
+      // 它所在的那一行（`dsa-actions`）：发送结果必须出现在这里面。
+      for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+        const cls = ancestors[i].props !== undefined && typeof ancestors[i].props.className === 'string'
+          ? ancestors[i].props.className
+          : ''
+        if (cls.indexOf('dsa-actions') >= 0) { sendButtonRow = ancestors[i]; break }
+      }
     }
     // 预览区那一行：发送的正文必须与它逐字相同（「看到什么就发什么」）。
     if (typeof props.className === 'string' && props.className.indexOf('dsa-preview-body') >= 0 && previewText === '') {
       previewText = textOf(node)
     }
   })
+
+  /**
+   * 读回「发送结果报在哪」。
+   *
+   * @returns `{ inRow: string|null, anywhere: string|null }`：`inRow` 是出现在发送按钮那一行
+   * 里的提示文本，`anywhere` 是页面上任何位置的提示文本。**只出现在别处等于用户看不到**，
+   * 而那正是本轮「按了没反应」的成因。
+   *
+   * 两样东西（按钮所在的行、提示）必须在**同一次遍历**里收集：`walk` 每次遇到函数型组件
+   * 都会重新渲染它，于是**每次遍历产生的节点对象都是新的**——拿上一次遍历拿到的行去比
+   * 这一次的祖先链永远不会命中。这一点让我连报了两轮假的「没有显示在按钮那一行」。
+   */
+  function readNotice() {
+    let row = null
+    const notices = []
+    walk(tree, (node, ancestors) => {
+      const props = node.props || {}
+      const className = typeof props.className === 'string' ? props.className : ''
+      if (row === null && node.type === 'button' && className.indexOf('dsa-btn-primary') >= 0) {
+        for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+          const ancestorClass = ancestors[i].props !== undefined && typeof ancestors[i].props.className === 'string'
+            ? ancestors[i].props.className
+            : ''
+          if (ancestorClass.indexOf('dsa-actions') >= 0) { row = ancestors[i]; break }
+        }
+      }
+      if (className.indexOf('dsa-notice') >= 0) notices.push({ text: textOf(node), chain: ancestors })
+    })
+    const inRow = notices.find((n) => row !== null && n.chain.indexOf(row) >= 0)
+    return {
+      inRow: inRow === undefined ? null : inRow.text,
+      anywhere: notices.length > 0 ? notices[0].text : null,
+    }
+  }
 
   /** 逐叶比较两份配置，返回发生变化的路径与新值。 */
   function diffLeaves(left, right, prefix) {
@@ -300,13 +358,21 @@ export async function auditClientAutosave(options) {
   evidence.previewText = previewText
   evidence.buttonTexts = buttonTexts
 
-  /** 重渲染到稳定。点击/改动之后都要走一遍，否则状态更新不会被提交。 */
+  /**
+   * 重渲染到稳定，并**更新 `tree`**。
+   *
+   * 第一版只渲染不更新，于是后面所有「读回界面」的断言都在看**旧树**：
+   * 报出来的是「结果没有显示在按钮那一行（页面上它出现在 null）」——看着像产品没渲染，
+   * 其实是审计自己没看新树。
+   */
   const rerender = () => {
     for (let pass = 0; pass < 4; pass += 1) {
       const result = engine.render(component, {})
+      tree = result.tree
       result.commit()
       if (!result.isDirty()) break
     }
+    return tree
   }
 
   // ---- 断言 ----
@@ -353,6 +419,31 @@ export async function auditClientAutosave(options) {
         }
       }
       rerender()
+      // **结果必须报在按钮那一行里。** 「点了按钮、结果显示在页面底部」正是本轮
+      // 用户报的「按了没反应」——只断言「文本存在」抓不到它。
+      const okNotice = readNotice()
+      evidence.noticeInRow = okNotice.inRow
+      evidence.noticeAnywhere = okNotice.anywhere
+      if (okNotice.inRow === null) {
+        problems.push(`发送成功后，结果没有显示在「发送这条通知」那一行（页面上它出现在 ${JSON.stringify(okNotice.anywhere)}）`)
+      }
+
+      // 失败路径同样要报在按钮旁边，而且 404 要说清是「Host 半边还没重启」。
+      notifyMode = 'missing'
+      const beforeFailure = previewPosts.length
+      sendButton.props.onClick()
+      rerender()
+      const failNotice = readNotice()
+      evidence.failureNoticeInRow = failNotice.inRow
+      if (failNotice.inRow === null) {
+        problems.push(`发送失败时，原因没有显示在按钮那一行（页面上它出现在 ${JSON.stringify(failNotice.anywhere)}）`)
+      } else if (!/重启/.test(failNotice.inRow)) {
+        problems.push(`端点不存在（404）时应当说清是「要重启 DSH」，实际提示是 ${JSON.stringify(failNotice.inRow)}`)
+      }
+      if (previewPosts.length !== beforeFailure) {
+        problems.push('404 探针不该被记成一次成功投递')
+      }
+      notifyMode = 'ok'
     }
   }
 

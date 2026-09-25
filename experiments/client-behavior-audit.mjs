@@ -36,6 +36,8 @@ console.log(`  自动保存说明      已渲染=${evidence.hintSeen}`)
 console.log(`  标签名            zh=${JSON.stringify(evidence.titleZh)} en=${JSON.stringify(evidence.titleEn)}`)
 console.log(`  发送按钮          ${JSON.stringify(evidence.sendButtonText)}`)
 console.log(`  预览那一行        ${JSON.stringify(evidence.previewText)}`)
+console.log(`  成功提示（按钮旁）${JSON.stringify(evidence.noticeInRow)}`)
+console.log(`  404 提示（按钮旁）${JSON.stringify(evidence.failureNoticeInRow)}`)
 console.log(`  页面上的按钮      ${evidence.buttonTexts.join(' / ')}`)
 
 let failures = 0
@@ -65,6 +67,11 @@ if (process.argv.includes('--mutate')) {
       label: '把「发送这条通知」按钮降级成普通按钮',
       source: source.replace("className: 'dsa-btn dsa-btn-primary dsa-btn-sm',", "className: 'dsa-btn dsa-btn-sm',"),
       expect: /找不到「发送这条通知」按钮/,
+    },
+    {
+      label: '把发送结果挪回页面底部（用户点了看不到反应）',
+      source: source.split("where: 'editor'").join("where: 'footer'"),
+      expect: /没有显示在「发送这条通知」那一行/,
     },
     {
       label: '把标签名改回去',

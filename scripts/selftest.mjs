@@ -997,6 +997,11 @@ test('行为审计本身有效：破坏自动保存、加回保存按钮、拿�
       expect: /找不到「发送这条通知」按钮/,
     },
     {
+      label: '把发送结果挪回页面底部（用户点了看不到反应）',
+      source: CLIENT_SOURCE.split("where: 'editor'").join("where: 'footer'"),
+      expect: /没有显示在「发送这条通知」那一行/,
+    },
+    {
       label: '把标签名改回去',
       source: CLIENT_SOURCE.replace("title: '会话通知',", "title: 'SessionAlert',")
         .replace("title: 'Session Alert',", "title: 'SessionAlert',"),
