@@ -140,9 +140,22 @@ if (state !== null) {
     const applied = report.applied || null
     check('样式已注入且浏览器解析出规则', report.injected === true && report.tags === 1 && report.rules > 0,
       `injected=${report.injected} tags=${report.tags} rules=${report.rules} error=${report.error}`)
-    check('样式实测作用到元素上（.dsa-root 算成 display:flex）',
-      applied !== null && applied.display === 'flex',
-      `applied=${JSON.stringify(applied)}——若为 block，说明样式表在文档里但没匹配到元素`)
+    // **`applied === null` 不是失败**，只表示设置页此刻没有渲染（`.dsa-root` 不在文档里），
+    // 因此无从测量。这一点本轮踩过：第一版把它判成 FAIL，于是在应用刚重启、用户还没打开
+    // 设置页时，「还没看」被报成「坏了」——**假失败和假通过一样有害**。
+    // 只有**测到了却不是 flex** 才是真失败。
+    if (applied === null) {
+      note('样式实测暂不可测（设置页未渲染）',
+        '打开「设置 → SessionAlert」后这一项变成可判定读数：本插件的样式表把 .dsa-root ' +
+        '定为 display:flex，而普通 div 是 block/normal。')
+    } else {
+      check('样式实测作用到元素上（.dsa-root 算成 display:flex）', applied.display === 'flex',
+        `applied=${JSON.stringify(applied)}——若为 block，说明样式表在文档里但没匹配到元素`)
+    }
+    // `dynTags` 是**动态半边**那条路留下的标记（`styles.insert` 打的 `data-dyn`）。
+    // 它非零就说明有人把死路加了回来——这条断言与源码审计互为补充。
+    check('没有走 `styles.insert` 那条死路（data-dyn 标签数为 0）', (report.dynTags || 0) === 0,
+      `dynTags=${report.dynTags}——静态半边不存在这个内置，出现它说明代码被改回去了`)
     console.log(`         读数：${JSON.stringify(report)}（${desktopStyles.ageMs}ms 前）`)
   }
 
