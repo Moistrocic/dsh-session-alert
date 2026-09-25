@@ -96,6 +96,27 @@ RESULT: raised=true reverted=True unchanged=True
 
 `session/event` 与 `api-session/error` 是 `emit` 模式，无需 `next`，写法正确。
 
+### 审计已机器化并纳入 `npm test`
+
+这类缺陷无法靠人工记忆避免，因此做成了检查：读源码里每个 `ctx.on(...)` 的注册，
+按事件的 dispatch mode 逐个判断它是否正确地交出了决定权。
+
+- [`scripts/listener-mode-audit.mjs`](../scripts/listener-mode-audit.mjs)：可复用模块，
+  含 mode 表（来源是 `cordis_inspect_query` 的 Host Event 目录）
+- 纳入 `npm test`：3 条断言，其中一条是**变异测试**——确认审计本身能抓到缺陷
+- [`experiments/listener-mode-audit.mjs`](../experiments/listener-mode-audit.mjs)：
+  独立入口，**复用模块而不做第二份实现**（两份逻辑迟早漂移，而漂移的那份不会有人发现）
+
+**一个不会失败的检查等于没有检查。** 因此变异断言要求：喂一段缺 `return next()` 的源码
+必须恰好报出一条问题；补上后必须通过；`emit` 模式带 `next` 形参也应被指出。
+也手工做过真实变异（从 `lib/index.js` 去掉 `return next()`）→ 退出 1，恢复 → 退出 0。
+
+mode 表里查不到的事件会让审计**失败**而不是跳过，以免新加监听器时漏审。
+
+**一个尚未消除的风险：修复要等 DSH 重启才生效。** Host 半边在 DSH 进程内，
+而插件无法自行重载宿主。在重启之前，运行中的插件仍是旧代码，**用户的提问与审批
+仍会被它否决**。这不是可以「稍后处理」的事，已当面告知用户。
+
 ## 尚未完成
 
 1. **另三类事件的真实环境观测**：接线已用逐场景隔离测试验证通过（见「已确证」），
