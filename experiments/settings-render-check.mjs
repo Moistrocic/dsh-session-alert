@@ -192,8 +192,20 @@ const slots = {
 // 设置页现在按官方模板写法取用 slots：插件声明 `inject: ['slots']`，
 // 组件里用 `ctx.slots.inject(...)`，而不是运行时的 `ctx.get('slots')`。
 // 替身必须照此提供，否则测的是已废弃的旧路径（会静默不注册，断言全挂）。
+//
+// 同时提供 `locale`：插件会把文本字典注册进去并绑定翻译函数。
+// **只提供 slots 会让本地化那段代码根本不执行**，测不到它会不会抛错。
+const registeredLocaleDicts = []
+const localeService = {
+  register: (ns, locale, dict) => {
+    registeredLocaleDicts.push({ ns, locale, keys: Object.keys(dict).length })
+    return () => {}
+  },
+  bind: () => (key) => key,
+}
 const ctx = {
   effect: (fn) => { try { fn() } catch (e) { console.log('  effect 抛错:', e.message) } ; return () => {} },
+  get: (name) => (name === 'locale' ? localeService : undefined),
   slots,
 }
 
@@ -259,6 +271,12 @@ const classNames = []
   if (node.props && node.props.className) classNames.push(String(node.props.className))
   if (node.children) node.children.forEach(walk)
 })(tree)
+
+// 验证本地化注册确实发生了（此前替身不提供 locale，那段代码根本没执行）
+check('向 locale 注册了字典', registeredLocaleDicts.length === 2,
+  '实际注册 ' + registeredLocaleDicts.length + ' 条：' + JSON.stringify(registeredLocaleDicts))
+check('注册覆盖 zh 与 en（en 是 DSH 的兜底语言，缺它会退化成显示键名）',
+  registeredLocaleDicts.some((d) => d.locale === 'zh') && registeredLocaleDicts.some((d) => d.locale === 'en'))
 
 const all = texts.join(' | ')
 const hasClass = (c) => classNames.some((x) => x.split(' ').indexOf(c) >= 0)
