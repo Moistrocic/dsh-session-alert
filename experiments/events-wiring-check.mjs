@@ -11,6 +11,7 @@
 //
 // 它验证的是**接线**，不是「真实环境下事件会不会到达」。后者只能靠真实观测，
 // 已在 docs/implementation-progress.md 里如实标注。
+import { Readable } from 'node:stream'
 import { apply } from '../lib/index.js'
 
 let failures = 0
@@ -46,8 +47,16 @@ function freshHarness(config) {
         }
       }
       if (name === 'agents') return { roots: () => [{ id: 'session-root-1' }] }
-      if (name === 'webServer') return { register: (route) => { routes.push(route); return () => {} } }
       return undefined
+    },
+    // 路由注册现在走 `ctx.inject(['webServer'], cb)` —— 等依赖就绪再执行。
+    // 替身必须**同步调用该回调**，否则路由一条都注册不上，而本文件针对路由的断言
+    // 会因此静默失效（拿不到 /state 就报「读不到状态」，看起来像插件的问题）。
+    inject: (deps, callback) => {
+      if (Array.isArray(deps) && deps.includes('webServer')) {
+        callback({ webServer: { register: (route) => { routes.push(route); return () => {} } } })
+      }
+      return () => {}
     },
     on: (event, handler) => { handlers.set(event, handler) },
   }
@@ -56,19 +65,82 @@ function freshHarness(config) {
   return { handlers, routes, ctxs: scoped }
 }
 
-/** 从插件的 /state 路由读回信号表与活动列表。 */
+/**
+ * 从插件的路由读回信号表与活动列表。
+ *
+ * 路由形状是**一条 `kind: 'prefix'` 路由**覆盖 ROUTE_PREFIX，端点在其处理器内分派。
+ * 早先这里按「路径以 `/state` 结尾」去找路由，那个写法对应的是「每个端点一条路由」的
+ * 旧设计——而**旧设计的路由根本没生效**（缺 `kind` 字段），设置页因此收到 404。
+ * 自检当时却绿着，因为它只检查了路由**条数**，没检查**形状**。
+ */
 async function readState(routes) {
-  const route = routes.find((r) => r.path.endsWith('/state'))
+  const route = routes.find((r) => r.kind === 'prefix' && r.path === '/api/dsh-session-alert')
   if (route === undefined) return null
   let captured = null
   await route.handler(
-    { socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:19387' } },
+    {
+      method: 'GET',
+      url: '/api/dsh-session-alert/state',
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:19387' },
+    },
     { statusCode: 0, setHeader: () => {}, end: (body) => { captured = JSON.parse(body) } },
   )
   return captured
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 30))
+
+/**
+ * 逐端点探测前缀路由的**分派是否正确**。
+ *
+ * 只断言「路由注册了」不够：真正出错的地方是分派——端点名、HTTP 方法、未知路径的回退。
+ * 这里按「方法 + 路径」逐一打进去，拿回状态码。
+ *
+ * @returns `Map<'GET /path', statusCode>`。
+ */
+async function probeEndpoints(routes) {
+  const route = routes.find((r) => r.kind === 'prefix')
+  const out = new Map()
+  if (route === undefined) return out
+  const probes = [
+    ['GET', '/api/dsh-session-alert/state', undefined],
+    ['GET', '/api/dsh-session-alert/nope', undefined],
+    ['POST', '/api/dsh-session-alert/state', '{}'],
+    ['POST', '/api/dsh-session-alert/client-state', '{"kind":"desktop","focused":false}'],
+    ['POST', '/api/dsh-session-alert/test', '{}'],
+    ['POST', '/api/dsh-session-alert/clear-activity', '{}'],
+  ]
+  for (const [method, url, body] of probes) {
+    let status = 0
+    let captured = null
+    // 用真实的 Readable 作为请求体，而不是手写的 async iterator。
+    // 手写版本与 Node 的流协议不完全一致，会让读取请求体的处理器抛错，
+    // 于是探针报 -1——那是**探针的问题**，却看起来像端点坏了。
+    const stream = Readable.from(body === undefined ? [] : [Buffer.from(body, 'utf8')])
+    const request = Object.assign(stream, {
+      method,
+      url,
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:19387' },
+    })
+    try {
+      await route.handler(request, {
+        statusCode: 0,
+        setHeader: () => {},
+        end: (text) => { try { captured = JSON.parse(text) } catch { captured = text } },
+      })
+      status = 200
+    } catch (error) {
+      status = -1
+    }
+    // 未知端点回 404——替身没保存 statusCode，因此按响应体识别。
+    const text = typeof captured === 'string' ? captured : JSON.stringify(captured)
+    if (text.includes('未知端点')) status = 404
+    out.set(`${method} ${url}`, status)
+  }
+  return out
+}
 
 // ---- 逐场景隔离验证 ----
 const cases = [
@@ -204,7 +276,39 @@ console.log('\n=== 接线存在性 ===')
   check('注册了 user-questions/request', handlers.has('user-questions/request'))
   check('注册了 approval/request', handlers.has('approval/request'))
   check('注册了 api-session/error', handlers.has('api-session/error'))
-  check('注册了设置页路由', routes.length >= 2, `实际 ${routes.length} 条`)
+
+  // **路由形状必须断言，不能只断言条数。**
+  //
+  // 这条曾经漏掉，代价是设置页在真实环境里收到 404：
+  // 旧代码注册的是 `{ method, path, handler }`，而契约是
+  // `WebRoute { kind: 'exact' | 'prefix'; path; handler }`——缺 `kind` 的路由不会按预期生效，
+  // 未命中的请求由 fallback 回 404。而当时的自检只检查「路由条数 >= 2」，**照样绿**。
+  check('路由数量为 1（一条前缀路由，端点在内部分派）', routes.length === 1, `实际 ${routes.length} 条`)
+  const route = routes[0]
+  check('路由带 kind 字段（契约要求，缺它路由不生效）', route !== undefined && typeof route.kind === 'string',
+    route === undefined ? '没有路由' : `kind=${JSON.stringify(route.kind)}`)
+  check("路由 kind 是 'prefix' 或 'exact'",
+    route !== undefined && (route.kind === 'prefix' || route.kind === 'exact'),
+    route === undefined ? '' : `kind=${JSON.stringify(route.kind)}`)
+  check('路由不再带非契约的 method 字段', route === undefined || route.method === undefined,
+    route === undefined ? '' : `method=${JSON.stringify(route.method)}`)
+  check('路由路径是契约前缀', route !== undefined && route.path === '/api/dsh-session-alert',
+    route === undefined ? '' : `path=${JSON.stringify(route.path)}`)
+  check('路由 handler 是函数', route !== undefined && typeof route.handler === 'function')
+
+  // 端点分派必须真的按方法区分：GET /state 应成功，未知端点应回 404。
+  const endpoints = await probeEndpoints(routes)
+  check('GET /state 返回 200', endpoints.get('GET /api/dsh-session-alert/state') === 200,
+    `实际 ${endpoints.get('GET /api/dsh-session-alert/state')}`)
+  check('未知端点返回 404（不静默落到某个分支）',
+    endpoints.get('GET /api/dsh-session-alert/nope') === 404,
+    `实际 ${endpoints.get('GET /api/dsh-session-alert/nope')}`)
+  check('方法不匹配时返回 404（POST /state 不是合法端点）',
+    endpoints.get('POST /api/dsh-session-alert/state') === 404,
+    `实际 ${endpoints.get('POST /api/dsh-session-alert/state')}`)
+  check('POST /client-state 返回 200',
+    endpoints.get('POST /api/dsh-session-alert/client-state') === 200,
+    `实际 ${endpoints.get('POST /api/dsh-session-alert/client-state')}`)
 }
 
 console.log('')
