@@ -39,23 +39,27 @@
 
 ## 二、投递链的关键实现知识
 
-这些是本次设计中最有价值的资产。它们的来源是既有实现，**尚未在 v2 中重新验证**；
-标注「须验证」的项要求在实现阶段逐条实测。
+这些是本次设计中最有价值的资产。**实现阶段已逐条验证**，结论与验证方式记录如下；
+被实测推翻的条目已在原处标注更正。
 
-| # | 结论 | 验证方式 |
+| # | 结论 | 验证结果 |
 | --- | --- | --- |
-| 1 | **必须用 PowerShell 5.1，不能用 `pwsh`。** PowerShell 7 里 `[Windows.UI.Notifications.ToastNotificationManager, ..., ContentType=WindowsRuntime]` 会抛 `Unable to find type`——.NET 5 移除了内置的 WinRT 类型投影。 | 须验证：在 pwsh 7 与 5.1 各跑一次同一段脚本 |
-| 2 | **脚本用 `-EncodedCommand` 传，编码为 UTF-16LE 的 base64。** 这是唯一能无损穿过中文标题与正文的参数通道。 | 须验证：发一条含中文的 toast |
-| 3 | **`Show()` 无返回值，所以投递必须「验证」而非「假定」。** 做法是发送后回读操作中心历史，命中才认为平台接受了这条 toast。 | 须验证：故意发一条非法 AUMID，确认历史回读能区分成功与失败 |
-| 4 | **AUMID 决定是否真的上屏。** 未注册的 AUMID 是合法发送者，但 toast 会被接受进操作中心却**不显示横幅**——所以「API 没抛异常」什么也不能证明。发送者应由**注册状态**选择：自有 AUMID 可用就用它，否则借用 Windows PowerShell 的 AUMID 兜底。 | 须验证（也是验收项）：临时注销自有 AUMID，确认回退生效 |
-| 5 | **`scenario="urgent"` 是 Windows 唯一会让 toast 留在屏幕上直到用户关闭的形态**（对应「常驻」模式）；`duration="long"` 是可申请的最长横幅。 | 须验证：分别发「常驻」与「10 秒」两条，观察差异 |
-| 6 | **降级顺序：** 自有 AUMID toast → PowerShell AUMID toast → 托盘气泡（`NotifyIcon.ShowBalloonTip`）。脚本用**退出码**汇报实际走通的是哪条路径。 | 须验证（验收项）：逐级制造失败，确认降级发生 |
-| 7 | **`spawn` 必须用 `stdio: 'ignore'`**（配合 `windowsHide: true`）。 | 须验证：确认管道 stdio 在本沙箱下确实失败、`'ignore'` 确实可用 |
-| 8 | **操作中心持久化需要一次 HKCU 写入：** 建 `...\Notifications\Settings\<aumid>` 键并写 `ShowInActionCenter=1`。否则 Win32 AUMID 的 toast 在应用获得焦点后就会从操作中心消失。 | 须验证：写入前后各发一条，检查通知中心 |
-| 9 | **注入风险：绝不能把标题/正文拼进命令行字符串。** 必须用 `-EncodedCommand`；脚本内构造 XML 时用 `CreateTextNode`，不拼 XML 字符串。 | 须验证：标题里放引号与 `<b>`，确认安全且显示正确 |
-| 10 | **任何进程启动都不得分配控制台**，判据是 `GetConsoleWindow()` 返回 `NULL`，而不是「窗口被隐藏」。通知路径的 `stdio:'ignore'` + `windowsHide:true` 实测已满足；协议激活路径必须用 `conhost.exe --headless`。 | 已实测，见 [ADR 0004](./adr/0004-no-console-allocation.md) |
-| 11 | **`.ps1` 必须带 UTF-8 BOM。** Windows PowerShell 5.1 读取**无 BOM** 的 `.ps1` 时按 ANSI 解码（中文系统即 GBK），脚本内中文变乱码，进而破坏引号配对、报出与真实原因无关的语法错误。 | 已实测：无 BOM 时报 `Missing '=' operator after key in hash literal`，加 BOM 后正常 |
-| 12 | **`.ps1` 必须用 CRLF 换行。** LF 会让 PowerShell 5.1 的 `param(...)` 块解析失败，报 `Unexpected token ')'`。 | 已实测：同一脚本 LF 换行报错，CRLF 正常 |
+| 1 | **必须用 PowerShell 5.1，不能用 `pwsh`。** PowerShell 7 里 `[Windows.UI.Notifications.ToastNotificationManager, ..., ContentType=WindowsRuntime]` 会抛 `Unable to find type`——.NET 5 移除了内置的 WinRT 类型投影。 | ✅ 已验证，且被用作降级演练的**真实失败模式**（把解释器指向 pwsh 7 → 两条 toast 路径全废 → 落到托盘气泡，退出码 6） |
+| 2 | **脚本用 `-EncodedCommand` 传，编码为 UTF-16LE 的 base64。** 这是唯一能无损穿过中文标题与正文的参数通道。 | ✅ 已验证：中文 toast 投递成功 |
+| 3 | **`Show()` 无返回值，所以投递必须「验证」而非「假定」。** 做法是发送后回读操作中心历史。 | ✅ 已验证，**并加强**：每条通知带一次性随机 `Tag`，按 Tag 命中才算平台接受。这个加强暴露了第 4 条下方那条关键事实 |
+| 4 | **AUMID 决定是否真的上屏。** 未注册的 AUMID 是合法发送者，但会进操作中心却**不显示横幅**。发送者应由**注册状态**选择。 | ✅ 已验证。**加强后的结论：未注册的随机 AUMID 一样会进历史，所以「历史里有这条」证明不了横幅出现过**。因此未注册时**根本不尝试**自有 AUMID——试它只会得到「进历史但无横幅」，而按退出码约定会报 `0`，那是假信号 |
+| 5 | **`scenario="urgent"` 是 Windows 唯一会让 toast 留在屏幕上直到用户关闭的形态**；`duration="long"` 是最长横幅。 | ✅ 已验证：常驻与限时两种都投递成功，操作中心留存行为符合预期 |
+| 6 | **降级顺序：** 自有 AUMID toast → PowerShell AUMID toast → 托盘气泡。脚本用**退出码**汇报实际走通的是哪条。 | ✅ 已验证（四阶段演练各阶段 FAIL=0）：改名后直接走 code 5（自有 AUMID 根本没被尝试）；指向 pwsh 7 后两条 toast 全废 → code 6；恢复后 code 0。改名在 `try/finally` 内，末段用 SHA256 证明恢复到原字节 |
+| 7 | **`spawn` 用 `stdio: 'ignore'`**（配合 `windowsHide: true`）。 | ⚠️ **理由已更正。** 原写「管道 stdio 会被沙箱拦（EPERM）」——那是上一个会话策略（`workspace-write`）下的观察，当前 `danger-full-access` 下三种 stdio 都正常。**结论不变，但真正的理由是：`'ignore'` 与 `windowsHide` 合起来使 `GetConsoleWindow()` 返回 `NULL`**（ADR 0004 的判据）。保留错误的理由会让后来者在不拦的环境里以为可以随便改 |
+| 8 | ~~操作中心持久化需要写 `HKCU\...\ShowInActionCenter=1`~~ | ❌ **已排除，不需要写。** 原观察「只留得住最新一条」的真因是分发器自己的 `ExpirationTime`（5 秒后自然消失，实测 4 → 2 条），行为完全正确。不写该值，两个不同进程发的常驻通知都留在操作中心（`historyCount: 2`）。**差一点就按错误归因去改用户的注册表** |
+| 9 | **注入风险：绝不能把标题/正文拼进命令行字符串。** 用 `-EncodedCommand`；脚本内用 `CreateTextNode` 构造 XML。 | ✅ 已验证，且是**回读操作中心里存下来的那份 XML**（不是拿送进去的原文自证）：`'`、`<b>`、`<script>`、emoji 都以文本形式存下，反转义后与输入逐字相等 |
+| 10 | **任何进程启动都不得分配控制台**，判据是 `GetConsoleWindow()` 返回 `NULL`，而不是「窗口被隐藏」。 | ✅ 已验证。协议激活路径最终改为**编译成 GUI 子系统的独立启动器**（见 [ADR 0005](./adr/0005-windowless-launcher-and-foreground-lock.md)），ADR 0004 中「用 conhost --headless」那一处已被取代 |
+| 11 | **`.ps1` 必须带 UTF-8 BOM。** PowerShell 5.1 读无 BOM 的 `.ps1` 按 ANSI（中文系统即 GBK）解码，中文乱码后破坏引号配对。 | ✅ 已实测：无 BOM 时报 `Missing '=' operator after key in hash literal`，加 BOM 后正常 |
+| 12 | **`.ps1` 必须用 CRLF 换行。** LF 会让 PowerShell 5.1 的 `param(...)` 块解析失败。 | ✅ 已实测：同一脚本 LF 报 `Unexpected token ')'`，CRLF 正常 |
+| 13 | **从 `.lnk` 读回 AUMID 必须走 shell 的扩展属性。** 同一个刚写好的 `.lnk`，`IPropertyStore.GetValue(PKEY_AppUserModel_ID)` 返回 `VT_EMPTY`，而 `Shell.Application` 的 `ExtendedProperty('System.AppUserModel.ID')` 读得出正确值。 | ✅ 已实测。**用前者做幂等判断会永远认为快捷方式不对、反复重建** |
+| 14 | **`ShowWindow` 的返回值是「窗口此前是否可见」，不是「成功与否」。** | ✅ 已实测：对隐藏窗口调 `SW_SHOW` 返回 `False` 是预期值。**按「返回值必须为 True」验收会把正确实现误判为失败** |
+| 15 | **PowerShell 用 `&` 调用 GUI 子系统 exe 不会等待它退出**（实测 9ms 返回，且 `$LASTEXITCODE` 保持上一个 native 命令的值）。 | ✅ 已实测。**曾因此得到一份假证据**：用 `$LASTEXITCODE` 判断产物自检结果时，那个码其实来自编译器。必须用 `Start-Process -Wait -PassThru` 再看 `.ExitCode` |
+| 16 | **并发实例用 `File.AppendAllText` 写日志会静默丢整行。** | ✅ 已实测，且丢过。表现为「看起来那段代码没执行」，与「代码没生效」无法区分。已改为共享读写追加，并给每行加 `[pid]` 前缀 |
 
 > 第 10–12 条都是**静态约束**，不是运行时逻辑：违反它们的代码不会在单测里失败，只会在真实
 > 机器上以难以归因的方式表现（闪窗、乱码、莫名语法错误）。因此已写进 `.gitattributes`
