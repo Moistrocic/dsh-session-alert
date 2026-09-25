@@ -10,6 +10,10 @@ legacy/
 # 提交信息用的临时文件（PowerShell 无 heredoc，需落文件再传给 git -F）
 .commit-msg*
 
+# 编译产物：启动器由源码在安装时编译，不入库
+experiments/*.exe
+experiments/*.pdb
+
 # 编辑器与系统垃圾
 .DS_Store
 Thumbs.db
