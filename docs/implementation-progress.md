@@ -6,6 +6,73 @@
 
 ---
 
+# 2026-09-25 第五轮：通知最上方那一行 = 配置的通知署名
+
+## 用户要的是什么（先把话说清楚）
+
+用户说「通知标题有些问题：我想换的标题应当把 `dsh-session-alert` 替换掉，而不是放在通知
+内容最上方」。实测把运行中的记录读出来之后才对齐：
+
+```
+DSH Session Alert          ← ① 应用名：Windows 按 AUMID 的显示名渲染，**不是** toast XML 决定的
+Deepseek Harness           ← ② toast XML 的标题行（设置里的「通知标题」）
+dsh-session-alert · 对齐桌面版继续未完成任务 已完成一轮，等待你的下一步指令。
+                           ← ③ 正文（开头的 dsh-session-alert 是 {workspace} = 工作区目录名）
+```
+
+用户要的是 **① 显示他的署名**，而不是让署名再占一行（②）。
+
+## 先做实验，再改结构
+
+`<text id="1">` 只是正文上方那一行；① 由 Windows 按 AUMID 的显示名渲染。改它有两条件:
+
+| 路线 | 代价 |
+| --- | --- |
+| 改注册表 `HKCU\Software\Classes\AppUserModelId\<AUMID>\DisplayName` | 一个值，快捷方式不动 |
+| 重命名开始菜单快捷方式 | 快捷方式的名字同时是 `isAumidRegistered()` 的判据（`<AUMID>.lnk`），改名会让插件误判「未注册」而退回后备 AUMID——**把横幅来源换成 Windows PowerShell，比原问题更糟** |
+
+因此先做了**一次可判定的实验**：只改那一个注册表值（已备份原值），发两条测试通知，
+请用户读 ①。结果：**① 变成了 `Deepseek Harness`**。于是实现走轻的那条路。
+
+## 实现
+
+1. 新脚本 [`scripts/set-aumid-display-name.ps1`](../scripts/set-aumid-display-name.ps1)：
+   幂等（值相同直接退出 0）、写入后**回读校验**、参数非法退出 4、回读不一致退出 3。
+2. Host 在**挂载时**与**每次保存配置后**同步它；AUMID 是「挂载后才注册成功」的情形也补了一次
+   （否则全新安装第一次会漏掉这一步）。同步成功后 `titleInAppName = true`。
+3. `buildToastScript` 按发送者决定要不要写标题行：`titleInAppName` 为真时**自有 AUMID 不写**
+   （那一行已经在最上面了），**后备 AUMID 始终写**（它的应用名是「Windows PowerShell」，
+   去掉标题就完全看不出是谁发的）。
+4. 同步失败**不假装成功**：`titleInAppName` 保持 `false`，toast 里继续写标题行——宁可
+   一句话出现两次，也不要让通知没有标题；同时记一条 warn。
+5. 设置页：字段改名为「通知署名」并加一句说明；诊断区新增一行「通知最上方那行」，
+   显示它是已同步还是仍是注册名。
+6. 验收工具 `post-restart-check.mjs` 新增一条**可机器判定**的检查：
+   读注册表里的 `DisplayName` 与 `/state` 里的 `config.title` 比对——不需要人眼看通知。
+
+## 顺带踩到并补上的一条硬约束：`.ps1` 必须是 UTF-8 BOM + CRLF
+
+新写的脚本第一版是**无 BOM 的 UTF-8**，于是 Windows PowerShell 5.1 按 ANSI 读它，
+中文全部乱码，**连代码结构都被读歪**：报出来的错是「DisplayName 不能为空」，
+看起来像参数传错了。仓库里其它 `.ps1` 都是 BOM + CRLF，只有新文件不是。
+
+现在 `npm test` 里有一条断言盯着：`scripts/` 与 `experiments/` 下每个 `.ps1` 都必须是
+UTF-8 BOM 且无裸 LF。**注意 `edit` 工具写的是无 BOM 的 UTF-8**，所以编辑 `.ps1` 之后
+必须重新补 BOM（这条断言会立刻抓到，本轮就抓到了两次）。
+
+另外把参数校验从 `Write-Error` 改成 `[Console]::Error.WriteLine` + `exit 4`：
+`$ErrorActionPreference = 'Stop'` 会把 `Write-Error` 变成终止错误，脚本在那之前就退出，
+调用方拿到的是 1 而不是约定的 4——**诊断指错方向比不报错更费时间**。
+
+## 实测
+
+- 实验：改注册表前 ① 是 `DSH Session Alert`，改后 ① 是 `Deepseek Harness`（用户确认）。
+- 脚本单测：幂等退出 0、写入并回读、非法参数退出 4、改回原值都实测过。
+- `post-restart-check.mjs`：`ok 通知最上方那一行 == 配置里的通知署名`。
+- `npm test` 70 → **73 条**（署名两条 + `.ps1` 编码一条）。
+
+---
+
 # 2026-09-25 第四轮：按场景发送预览（取代「发一条测试通知」）
 
 ## 一、按钮搬家：从通用测试通知 → 「通知内容」卡片里按场景发

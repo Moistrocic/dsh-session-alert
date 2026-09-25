@@ -45,10 +45,21 @@ DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows �
 每条关键断言都配一条**反向断言**（喂错误形状必须失败）。
 唯一 URL 由 `uniqueSourceUrl()` 统一负责，别自己写计数器。
 
+## 两条与 Windows/PowerShell 有关的硬约束
+
+1. **`.ps1` 必须是 UTF-8 BOM + CRLF**：Windows PowerShell 5.1 会按 ANSI 读无 BOM 的文件，
+   中文变乱码、**代码结构也会被读歪**（实测报出来的是「DisplayName 不能为空」，看着像参数错了）。
+   `npm test` 有一条断言盯着。**注意 `edit` 工具写的是无 BOM UTF-8**——改完 `.ps1` 要重新补 BOM。
+2. **通知最上面那一行不是 toast 标题**：它由 Windows 按 AUMID 的**显示名**渲染，
+   而 `<text id="1">` 是它下面那一行。插件把显示名同步成配置里的通知署名
+   （`scripts/set-aumid-display-name.ps1`），同步成功后自有 AUMID 就不再写标题行
+   （后备 AUMID 始终写）。**不要为了让那行改名去重命名开始菜单快捷方式**：
+   快捷方式的名字是 `isAumidRegistered()` 的判据，改名会让插件退回后备 AUMID。
+
 ## 常用命令
 
 ```powershell
-npm test                                     # 65 条离线断言
+npm test                                     # 73 条离线断言
 npm test -- --toast                          # 额外真发一条通知（真机冒烟）
 node experiments/post-restart-check.mjs      # 重启后先跑这条：逐项判定哪些修复已生效
 node experiments/events-wiring-check.mjs     # 事件接线（真实载荷 + 瀑布 next() 断言）

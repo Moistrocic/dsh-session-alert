@@ -41,7 +41,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -1088,6 +1088,64 @@ test('预览接口：未知场景与空正文都如实回 400，不发任何东�
   )
   assert.equal(empty.status, 400, `空正文应当回 400，实际 ${empty.status}`)
   assert.match(String(empty.body.error), /预览为空/)
+})
+
+// --------------------------------------------------- 通知署名（通知最上方那一行）
+//
+// 用户看到的「通知标题」其实是 Windows 用 AUMID 的**显示名**渲染的应用名，
+// 而不是 toast XML 里的标题行。因此：显示名同步成功后，自有 AUMID 那一条**不该再写标题行**
+// （否则同一句话出现两次）；后备 AUMID（应用名是「Windows PowerShell」）则**必须保留**
+// 标题行——去掉它，通知就完全看不出是谁发的。
+
+test('投递脚本：署名同步后自有 AUMID 不写标题行，后备 AUMID 始终保留', () => {
+  const senders = [{ aumid: contract.PRIMARY_AUMID, code: 0 }, { aumid: contract.FALLBACK_AUMID, code: 5 }]
+  // 按**顺序**取发送者行（第一行是自有 AUMID、第二行是后备），不去硬编码 base64 片段——
+  // 第一版就是这么写的，而片段对不上时报出来的失败是「后备 AUMID 必须保留标题行」，
+  // 看起来像产品错了，其实是断言自己的定位方式错了。
+  const senderFlags = (script) => script.split('\r\n')
+    .filter((line) => /@\{ aumid = .*withTitle = \$/.test(line))
+    .map((line) => /\$true|\$false/.exec(line)[0])
+
+  const notSynced = senderFlags(notify.buildToastScript({ title: 'T', body: 'B', senders, titleInAppName: false }))
+  assert.deepEqual(notSynced, ['$true', '$true'], '署名未同步时两条都要写标题行')
+
+  const synced = senderFlags(notify.buildToastScript({ title: 'T', body: 'B', senders, titleInAppName: true }))
+  assert.deepEqual(synced, ['$false', '$true'],
+    '署名已同步时自有 AUMID 不写标题行；后备 AUMID（应用名是 Windows PowerShell）必须保留')
+})
+
+test('投递脚本：标题节点确实受 $WithTitle 控制，且正文节点无条件写出', () => {
+  const script = notify.buildToastScript({ title: 'T', body: 'B' })
+  assert.match(script, /if \(\$WithTitle\) \{/)
+  assert.match(script, /-WithTitle \(\[bool\]\$sender\.withTitle\)/)
+  // 正文节点必须在 if 之外——否则不写标题时会连正文一起丢掉。
+  const bodyAppend = script.indexOf("[void]$binding.AppendChild($bodyNode)")
+  const ifStart = script.indexOf('if ($WithTitle) {')
+  const ifEnd = script.indexOf('}', script.indexOf("[void]$titleNode.AppendChild"))
+  assert.ok(bodyAppend > ifEnd && bodyAppend > ifStart, '正文节点应当在 $WithTitle 分支之外')
+})
+
+test('全部 .ps1 都是 UTF-8 BOM + CRLF（PowerShell 5.1 的硬要求）', () => {
+  // 这一条是本轮真实踩坑后补的：新写的 .ps1 用无 BOM 的 UTF-8，Windows PowerShell 5.1
+  // 会按 ANSI 读它，中文注释与字符串全部变成乱码，**连代码结构都会被读歪**
+  // （实测报出来的错是「DisplayName 不能为空」——看起来像参数传错了，其实是编码）。
+  // 只支持 LF 的编辑器（以及某些工具）会悄悄写回 LF，因此这条断言盯住两样东西。
+  const dirs = ['scripts', 'experiments']
+  const files = []
+  for (const dir of dirs) {
+    for (const entry of readdirSync(join(PACKAGE_ROOT, dir))) {
+      if (entry.endsWith('.ps1')) files.push(join(PACKAGE_ROOT, dir, entry))
+    }
+  }
+  assert.ok(files.length > 0, '没有找到任何 .ps1——这条检查会静默失效')
+  for (const file of files) {
+    const bytes = readFileSync(file)
+    const hasBom = bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF
+    assert.ok(hasBom, `${file} 缺少 UTF-8 BOM（PowerShell 5.1 会把中文读成乱码）`)
+    const text = bytes.toString('utf8')
+    const bareLf = /(?<!\r)\n/.test(text)
+    assert.ok(!bareLf, `${file} 里有裸 LF（PowerShell 5.1 的 param 块要求 CRLF）`)
+  }
 })
 
 if (process.argv.includes('--toast')) {

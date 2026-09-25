@@ -26,6 +26,7 @@
 // 客户端掉线、Host 读不到）。「尚未观测到 approval」属于信息项，不算失败——
 // 它依赖用户把审批策略改成 ask 并让 auto-review 拦下一次调用，见 HANDOFF 第七节。
 import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const argv = process.argv.slice(2)
@@ -237,6 +238,35 @@ if (graph === null) {
       check('页面收到的 client bundle 与磁盘 lib/client.js 逐字节相同', false, `取回失败：${error.message}`)
     }
   }
+}
+
+// ------------------------------------- 5) 通知最上方那一行（AUMID 显示名）
+//
+// 用户把通知最上面那一行当作「通知标题」，而它其实是 Windows 按 **AUMID 的显示名**渲染的
+// 应用名——toast XML 里的标题行在它下面。插件会在署名变化时把这个注册表值同步过去，
+// 同步成功后 toast 里就不再写标题行（否则同一句话出现两次）。
+//
+// 因此这一条是**可机器判定**的：注册表里的值与配置里的通知署名一致 = 那一行显示的就是它。
+if (process.platform === 'win32' && state !== null) {
+  const primary = state.aumid?.primary
+  const wanted = state.config?.title
+  let actual = null
+  if (typeof primary === 'string' && primary.length > 0) {
+    try {
+      const out = execFileSync('reg.exe', [
+        'query', `HKCU\\Software\\Classes\\AppUserModelId\\${primary}`, '/v', 'DisplayName',
+      ], { encoding: 'utf8' })
+      const match = /DisplayName\s+REG_SZ\s+(.*)/.exec(out)
+      actual = match === null ? null : match[1].trim()
+    } catch {
+      actual = null
+    }
+  }
+  check('通知最上方那一行 == 配置里的通知署名（AUMID 显示名已同步）',
+    actual !== null && actual === wanted,
+    `注册表里是 ${JSON.stringify(actual)}，配置里是 ${JSON.stringify(wanted)}` +
+    '——不一致时通知最上方仍显示注册名，插件会在 toast 里保留标题行（不静默，但也不是你要的样子）')
+  if (actual !== null) console.log(`         AUMID「${primary}」的显示名：${JSON.stringify(actual)}；titleInAppName=${state.aumid?.titleInAppName}`)
 }
 
 // ---------------------------------------------------------------- 汇总
