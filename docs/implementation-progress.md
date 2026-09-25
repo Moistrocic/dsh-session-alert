@@ -153,6 +153,35 @@ turn/end:completed  275ce19f-c3f…      skipped:not-a-root-session ← 子代�
 - 离线自检 [`experiments/shape-check.mjs`](../experiments/shape-check.mjs) 9 项全通过，
   实测确认空 actions 时生成的脚本数组为空、守卫为假、不建按钮。
 
+## 一个应当改回官方原语的地方（待办，非缺陷）
+
+`cordis_inspect_query({ platform: 'client', provider: 'Builtin', method: 'listBuiltins' })`
+列出了动态 Client 半边可用的五个符号，其中一个是：
+
+```
+host — "Package-private JSON RPC from Client to this Package's Host half."
+       host.call(method: string, args?: JsonValue): Promise<JsonValue>
+```
+
+**即「客户端 → 本包 Host 半边」的 RPC 是官方支持且成对存在的能力。**
+
+我当前用的是 HTTP 环回路由（`fetch('/api/dsh-session-alert/…')`）。它**能工作**
+（实测 `POST /client-state` → 200 `{"ok":true,"liveKinds":["desktop"]}`，
+且插件自注册的路由不需要凭据），但相比 `host.call` 有两个缺点：
+
+1. **多暴露了一个 HTTP 面。** 环回端口上的路由任何本机进程都能访问，
+   而 `host.call` 是包内私有通道，不经过网络。
+2. **少了一层约定。** 路由路径要在两处保持一致（Host 注册、Client 请求），
+   不一致时表现为静默失败；RPC 方法名是契约的一部分。
+
+**为什么当初改成了 HTTP**：我从 `dsh-doctor` 的客户端半边看到它用 `globalThis.fetch`
+访问 `/api/doctor`，于是推断「bundled 客户端走 HTTP 而不是 host.call」。
+那个推断只说明**它**选了 HTTP，不说明 `host.call` 不可用——而 Builtin 清单直接否证了后者。
+
+**结论**：这不是缺陷（HTTP 路径经实测可用），但 `host.call` 更合适。
+改回属于重构，需要在真实环境验证 RPC 是否按此约定连通，因此列为待办而不是现在动。
+顺带记下这次教训：**从一个实现的用法推断「只有这种用法」，是过度概括**。
+
 ## 一个必须记住的区别：磁盘上的代码 ≠ 运行中的代码
 
 **Host 半边在 DSH 进程内，改了 `lib/index.js` 后必须重新挂载插件才生效。**
