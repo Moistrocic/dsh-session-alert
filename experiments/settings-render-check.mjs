@@ -189,9 +189,12 @@ const slots = {
   inject: (key, cb) => { injected.push({ key, cb }); return () => {} },
   register: (meta, comp) => { injected.push({ meta, comp }); return () => {} },
 }
+// 设置页现在按官方模板写法取用 slots：插件声明 `inject: ['slots']`，
+// 组件里用 `ctx.slots.inject(...)`，而不是运行时的 `ctx.get('slots')`。
+// 替身必须照此提供，否则测的是已废弃的旧路径（会静默不注册，断言全挂）。
 const ctx = {
   effect: (fn) => { try { fn() } catch (e) { console.log('  effect 抛错:', e.message) } ; return () => {} },
-  get: (name) => (name === 'slots' ? slots : undefined),
+  slots,
 }
 
 const clientMod = definition.factory((name) => (name === 'react' ? react : {}))
