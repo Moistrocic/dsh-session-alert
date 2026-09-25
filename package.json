@@ -1,0 +1,56 @@
+{
+  "name": "dsh-session-alert",
+  "version": "0.2.0",
+  "description": "DSH 会话提醒插件：会话需要你介入时发一条可点击的 Windows 通知，点击后把 DSH 窗口显示在最上层。Web 与 desktop 两种端别分别处理。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.7-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "bin",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-launcher.ps1",
+    "test": "node scripts/selftest.mjs",
+    "test:toast": "node scripts/selftest.mjs --toast",
+    "register-aumid": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/register-aumid.ps1"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "notification",
+    "windows",
+    "toast",
+    "session-alert"
+  ],
+  "license": "MIT"
+}
